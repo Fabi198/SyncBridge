@@ -1,9 +1,13 @@
+import os
 import platform
 from pathlib import Path
+from dotenv import load_dotenv
 
-# Configuracion  estatica del cluster simetrico
+# Carga las variables del archivo .env si existe en la raíz
+load_dotenv()
+
+# Configuracion estatica del cluster simetrico
 NODES_CONFIG = {
-
     "DESKTOP-NU4MNUF": {
         "node_id": 0,
         "name": "Notebook",
@@ -16,9 +20,7 @@ NODES_CONFIG = {
         "base_path": Path(r"D:\\"),
         "mailbox": "Buzon_PC"
     }
-
 }
-
 
 def get_current_node() -> dict:
     """
@@ -44,6 +46,13 @@ def get_current_node() -> dict:
 
 # Instancia global de la configuración activa para el nodo actual
 CURRENT_NODE = get_current_node()
+
+# Credenciales genéricas de Google Drive API leídas desde el .env del usuario
+GDRIVE_CONFIG = {
+    "client_id": os.getenv("GDRIVE_CLIENT_ID"),
+    "client_secret": os.getenv("GDRIVE_CLIENT_SECRET"),
+    "folder_id": os.getenv("GDRIVE_FOLDER_ID")
+}
 
 if __name__ == "__main__":
     print("=" * 40)
