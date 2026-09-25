@@ -27,7 +27,7 @@ def process_remote_instructions(service, state_file_id):
             if not mailbox_name:
                 continue
                 
-            # Buscar el buzón del otro nodo
+            # Buscar el buzón del otro nodo en Drive
             query = f"name = '{mailbox_name}' and '{root_folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
             results = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
             folders = results.get('files', [])
@@ -37,7 +37,7 @@ def process_remote_instructions(service, state_file_id):
                 
             mailbox_id = folders[0]['id']
             
-            # Buscar comandos pendientes
+            # Buscar archivos de comandos pendientes (cmd_*.json) en el buzón plano
             cmd_query = f"'{mailbox_id}' in parents and name contains 'cmd_' and trashed = false"
             cmd_results = service.files().list(q=cmd_query, spaces='drive', fields='files(id, name)').execute()
             commands = cmd_results.get('files', [])
@@ -48,6 +48,7 @@ def process_remote_instructions(service, state_file_id):
                 
                 logging.info(f"📥 Descargando instrucción de {node_name}: {file_name}")
                 
+                # Descargar el contenido del JSON de instrucción
                 request = service.files().get_media(fileId=file_id)
                 fh = io.BytesIO()
                 downloader = MediaIoBaseDownload(fh, request)
@@ -57,9 +58,11 @@ def process_remote_instructions(service, state_file_id):
                 fh.seek(0)
                 
                 instruction = json.loads(fh.read().decode('utf-8'))
-                execute_local_instruction(instruction)
                 
-                # Borrar de la nube para no re-procesarlo
+                # Ejecutar la instrucción localmente (pasando el servicio para descargas físicas)
+                execute_local_instruction(service, instruction)
+                
+                # Borrar el comando de la nube para no re-procesarlo
                 service.files().delete(fileId=file_id).execute()
                 acciones_procesadas += 1
                 logging.info(f"🗑️ Instrucción procesada y eliminada de la nube: {file_name}")
@@ -72,14 +75,40 @@ def process_remote_instructions(service, state_file_id):
     except Exception as e:
         logging.error(f"❌ Error al procesar instrucciones remotas: {e}")
 
-def execute_local_instruction(instruction):
-    """Aplica la instrucción en el disco local"""
+def execute_local_instruction(service, instruction):
+    """Interpreta la instrucción JSON y aplica los cambios en el disco local"""
     action = instruction.get("action")
     src = instruction.get("src")
     dest = instruction.get("dest")
+    file_id = instruction.get("file_id")
+    rel_path_str = instruction.get("rel_path")
+    
+    base_path = CURRENT_NODE["base_path"]
     
     try:
-        if action == "RENAME":
+        if action == "CREATE_OR_UPDATE":
+            if not file_id or not rel_path_str:
+                return
+                
+            target_local_path = base_path / rel_path_str
+            target_local_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            logging.info(f"📥 Descargando archivo físico remoto para: {rel_path_str}")
+            
+            # Descargar el archivo físico desde Google Drive usando su file_id único
+            request = service.files().get_media(fileId=file_id)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+                
+            with open(target_local_path, 'wb') as f:
+                f.write(fh.getvalue())
+                
+            logging.info(f"✨ [REPLICADO] Archivo creado/actualizado localmente: {target_local_path}")
+            
+        elif action == "RENAME":
             src_path = Path(src)
             dest_path = Path(dest)
             if src_path.exists():
@@ -94,6 +123,8 @@ def execute_local_instruction(instruction):
             if target_path.exists() and target_path.is_file():
                 target_path.unlink()
                 logging.info(f"✨ [REPLICADO] Borrado local: {src}")
+            else:
+                logging.warning(f"⚠️ No se encontró el archivo para borrar: {src}")
                 
     except Exception as e:
         logging.error(f"❌ Error ejecutando instrucción local '{action}': {e}")

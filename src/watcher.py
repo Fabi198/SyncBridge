@@ -71,14 +71,25 @@ class SyncHandler(FileSystemEventHandler):
         self.is_initialized = True
         logging.info(f"✅ Escaneo inicial completado. {count} archivos indexados. Watchdog activo y listo.")
 
-    def register_instruction(self, action, src, dest=None):
-        """Crea un archivo JSON de instrucción liviano para comandos como RENAME o DELETE"""
+    def register_instruction(self, action, src, dest=None, file_id=None, rel_path=None):
+        """Crea un archivo JSON de instrucción liviano con los metadatos necesarios"""
         try:
+            base_path = CURRENT_NODE["base_path"]
+            
+            # Si no viene un rel_path explícito, lo calculamos desde el src si está dentro de la base
+            if not rel_path and src:
+                try:
+                    rel_path = Path(src).relative_to(base_path)
+                except ValueError:
+                    rel_path = Path(src).name
+
             instruction = {
                 "node": CURRENT_NODE["name"],
                 "action": action,
                 "src": str(src),
                 "dest": str(dest) if dest else None,
+                "file_id": file_id,
+                "rel_path": str(rel_path) if rel_path else None,
                 "timestamp": time.time()
             }
             
@@ -88,6 +99,7 @@ class SyncHandler(FileSystemEventHandler):
             with open(local_temp_path, 'w', encoding='utf-8') as f:
                 json.dump(instruction, f, indent=4)
                 
+            # Subir el comando JSON de forma plana al buzón
             upload_file_to_mailbox(self.service, local_temp_path, self.mailbox_id)
             
             if local_temp_path.exists():
@@ -104,8 +116,16 @@ class SyncHandler(FileSystemEventHandler):
             path_obj = Path(event.src_path)
             if path_obj.exists() and path_obj.is_file():
                 self.file_sizes[event.src_path] = path_obj.stat().st_size
-                logging.info(f"🟢 [CREACIÓN] Subiendo archivo: {event.src_path}")
-                upload_file_to_mailbox(self.service, event.src_path, self.mailbox_id)
+                logging.info(f"🟢 [CREACIÓN] Subiendo archivo plano: {event.src_path}")
+                
+                # 1. Subir archivo de forma plana al buzón y obtener su file_id
+                file_id = upload_file_to_mailbox(self.service, event.src_path, self.mailbox_id)
+                
+                # 2. Calcular ruta relativa y registrar instrucción CREATE_OR_UPDATE
+                base_path = CURRENT_NODE["base_path"]
+                rel_path = path_obj.relative_to(base_path)
+                
+                self.register_instruction("CREATE_OR_UPDATE", event.src_path, file_id=file_id, rel_path=rel_path)
         except Exception as e:
             logging.error(f"❌ Error en creación: {e}")
 
@@ -126,7 +146,15 @@ class SyncHandler(FileSystemEventHandler):
 
             self.file_sizes[event.src_path] = current_size
             logging.info(f"🟡 [MODIFICACIÓN] Actualizando archivo: {event.src_path}")
-            upload_file_to_mailbox(self.service, event.src_path, self.mailbox_id)
+            
+            # 1. Subir actualización de forma plana y obtener file_id
+            file_id = upload_file_to_mailbox(self.service, event.src_path, self.mailbox_id)
+            
+            # 2. Registrar instrucción CREATE_OR_UPDATE
+            base_path = CURRENT_NODE["base_path"]
+            rel_path = path_obj.relative_to(base_path)
+            
+            self.register_instruction("CREATE_OR_UPDATE", event.src_path, file_id=file_id, rel_path=rel_path)
         except Exception as e:
             logging.error(f"❌ Error en modificación: {e}")
 
@@ -169,7 +197,6 @@ def start_watching():
 
     print(f"--- Inicializando sincronizador para: {CURRENT_NODE['name']} ---")
     
-    # Conexión a Google Drive y preparación del buzón del nodo
     service = get_drive_service()
     root_folder = GDRIVE_CONFIG["folder_id"]
     mailbox_id = get_or_create_folder(service, CURRENT_NODE["mailbox"], root_folder)
