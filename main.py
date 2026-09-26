@@ -14,6 +14,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import tkinter as tk
 from tkinter import messagebox, ttk
+import logging
 
 # 1. Ejecutar el asistente de configuración inicial si no existe el .env
 from src.setup import run_setup_wizard
@@ -23,11 +24,27 @@ if not run_setup_wizard():
 # 2. Forzar recarga de entorno después del setup
 load_dotenv(override=True)
 
-# 3. Importar módulos de la app
+# 3. Importar módulos base para obtener la ruta de trabajo
 from src.config import BASE_PATH, CURRENT_NODE
+
+# --- CONFIGURACIÓN DE LOGS PERSISTENTES ---
+log_file_path = BASE_PATH / "syncbridge.log"
+BASE_PATH.mkdir(parents=True, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(log_file_path, encoding='utf-8'),
+        logging.StreamHandler(sys.stdout if sys.stdout else open(os.devnull, 'w'))
+    ]
+)
+# ------------------------------------------
+
+# 4. Importar módulos funcionales de la app
 from src.manifest import load_or_create_manifest
 from src.tray import init_system_tray
-from src.watcher import start_watching  # 👈 Nuestro querido Watchdog
+from src.watcher import start_watching  # 👈 Nuestro Watchdog
 
 def main():
     init_error = None
@@ -105,12 +122,12 @@ def main():
 
     try:
         # 🚀 1. Arrancar el Watchdog de sincronización en segundo plano (demonio)
-        print("👀 Iniciando vigilante Watchdog...")
+        logging.info("👀 Iniciando vigilante Watchdog...")
         watcher_thread = threading.Thread(target=start_watching, daemon=True)
         watcher_thread.start()
 
         # 🖥️ 2. Iniciar el System Tray en el hilo principal (bloqueante saludable)
-        print("🖥️ Iniciando System Tray...")
+        logging.info("🖥️ Iniciando System Tray...")
         init_system_tray()
         
     except Exception as e:
