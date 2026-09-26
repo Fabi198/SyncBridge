@@ -1,66 +1,29 @@
 import os
-import platform
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Carga las variables del archivo .env si existe en la raíz
-load_dotenv()
+# Forzar la recarga del .env por si se acaba de crear en el primer arranque
+load_dotenv(override=True)
 
-# Configuracion estatica del cluster simetrico
-NODES_CONFIG = {
-    "DESKTOP-NU4MNUF": {
-        "node_id": 0,
-        "name": "Notebook",
-        "base_path": Path(r"D:\\"),
-        "mailbox": "Buzon_Notebook"
-    },
-    "DESKTOP-4045BGE": {
-        "node_id": 1,
-        "name": "PC",
-        "base_path": Path(r"D:\\"),
-        "mailbox": "Buzon_PC"
-    }
-}
+# Soportamos tanto los nombres antiguos como los que usa el asistente gráfico nuevo
+SYNC_SECRET = os.getenv("SYNC_SECRET", "")
+GDRIVE_CLIENT_ID = os.getenv("GDRIVE_CLIENT_ID") or os.getenv("GOOGLE_CLIENT_ID", "")
+GDRIVE_CLIENT_SECRET = os.getenv("GDRIVE_CLIENT_SECRET") or os.getenv("GOOGLE_CLIENT_SECRET", "")
 
-def get_current_node() -> dict:
-    """
-    Identifica automáticamente el nodo actual comparando el hostname
-    del sistema operativo con el registro del clúster.
-    """
-    hostname = platform.node()
+NODE_NAME = os.getenv("CURRENT_NODE_NAME") or os.getenv("NODE_NAME", "MiNodo")
 
-    if hostname not in NODES_CONFIG:
-        raise PermissionError(
-            f"❌ Error de Autenticación: Este equipo (Hostname: '{hostname}') "
-            f"no está autorizado en la configuración de Sync-Bridge."
-        )
+# Leer la ruta base de forma dinámica
+raw_base_path = os.getenv("SYNC_BASE_PATH") or os.getenv("BASE_PATH")
+BASE_PATH = Path(raw_base_path) if raw_base_path else Path.home() / "SyncBridgeFolder"
 
-    node_data = NODES_CONFIG[hostname]
-    return {
-        "node_id": node_data["node_id"],
-        "name": node_data["name"],
-        "base_path": node_data["base_path"],
-        "mailbox": node_data["mailbox"],
-        "hostname": hostname
-    }
-
-# Instancia global de la configuración activa para el nodo actual
-CURRENT_NODE = get_current_node()
-
-# Credenciales genéricas de Google Drive API leídas desde el .env del usuario
 GDRIVE_CONFIG = {
-    "client_id": os.getenv("GDRIVE_CLIENT_ID"),
-    "client_secret": os.getenv("GDRIVE_CLIENT_SECRET"),
-    "folder_id": os.getenv("GDRIVE_FOLDER_ID")
+    "client_id": GDRIVE_CLIENT_ID,
+    "client_secret": GDRIVE_CLIENT_SECRET,
+    "folder_id": None # Se asignará dinámicamente al buscar/crear 'SyncBridge' en la nube
 }
 
-if __name__ == "__main__":
-    print("=" * 40)
-    print(" 🚀 SYNC-BRIDGE: NODO INICIALIZADO ")
-    print("=" * 40)
-    print(f"• Dispositivo: {CURRENT_NODE['name']}")
-    print(f"• ID de Nodo:  Node {CURRENT_NODE['node_id']}")
-    print(f"• Hostname:    {CURRENT_NODE['hostname']}")
-    print(f"• Ruta Base:   {CURRENT_NODE['base_path']}")
-    print(f"• Buzón Nube:  {CURRENT_NODE['mailbox']}")
-    print("=" * 40)
+CURRENT_NODE = {
+    "name": NODE_NAME,
+    "base_path": BASE_PATH,
+    "mailbox": f"mailbox_{NODE_NAME}"
+}

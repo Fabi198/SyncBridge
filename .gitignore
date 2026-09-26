@@ -7,8 +7,16 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Credenciales y Tokens de Autenticación
+# Compilación de PyInstaller
+/build/
+/dist/
+*.spec
+
+# Credenciales, entorno local y caché
 .env
 token.pickle
-*.json
+sync_manifest.json
+sync_rules.json
 *.log
+cmd_*.json
+*.json

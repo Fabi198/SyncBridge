@@ -7,30 +7,14 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
-from src.config import GDRIVE_CONFIG, CURRENT_NODE
+from src.config import GDRIVE_CONFIG, CURRENT_NODE, SYNC_SECRET
+from src.crypto import encrypt_text, decrypt_text
 
-# Alcance completo para administrar la carpeta de sincronización y los buzones
 SCOPES = ['https://www.googleapis.com/auth/drive']
 TOKEN_PATH = Path("token.pickle")
-CACHE_PATH = Path(".sync_cache.json")
-
-def load_local_cache():
-    """Carga el índice local de caché que asocia rutas relativas con file_id de Drive"""
-    if CACHE_PATH.exists():
-        try:
-            with open(CACHE_PATH, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-def save_local_cache(cache_data):
-    """Guarda el índice local de caché"""
-    with open(CACHE_PATH, 'w', encoding='utf-8') as f:
-        json.dump(cache_data, f, indent=4)
 
 def get_drive_service():
-    """Autentica y retorna el servicio de Google Drive usando las credenciales del .env"""
+    """Autentica y retorna el servicio de Google Drive usando credenciales del .env"""
     creds = None
     
     if TOKEN_PATH.exists():
@@ -57,8 +41,88 @@ def get_drive_service():
             
     return build('drive', 'v3', credentials=creds)
 
+def get_or_create_root_folder(service):
+    """Busca o crea la carpeta principal 'SyncBridge' en la raíz del Google Drive del usuario"""
+    folder_name = "SyncBridge"
+    query = f"name = '{folder_name}' and 'root' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    results = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
+    files = results.get('files', [])
+    
+    if files:
+        root_id = files[0]['id']
+        GDRIVE_CONFIG["folder_id"] = root_id
+        return root_id
+    else:
+        file_metadata = {
+            'name': folder_name,
+            'mimeType': 'application/vnd.google-apps.folder',
+            'parents': ['root']
+        }
+        folder = service.files().create(body=file_metadata, fields='id').execute()
+        root_id = folder.get('id')
+        GDRIVE_CONFIG["folder_id"] = root_id
+        print(f"✨ Carpeta principal 'SyncBridge' creada automáticamente en Google Drive (ID: {root_id})")
+        return root_id
+
+def upload_node_manifest(service, manifest_data, node_name):
+    """Cifra y sube el manifiesto del nodo a Google Drive"""
+    folder_id = GDRIVE_CONFIG["folder_id"]
+    manifest_filename = f"manifest_{node_name}.json"
+    
+    json_str = json.dumps(manifest_data, indent=4)
+    encrypted_content = encrypt_text(json_str, SYNC_SECRET)
+    
+    query = f"name = '{manifest_filename}' and '{folder_id}' in parents and trashed = false"
+    results = service.files().list(q=query, spaces='drive', fields='files(id)').execute()
+    files = results.get('files', [])
+    
+    media = MediaIoBaseUpload(
+        io.BytesIO(encrypted_content.encode('utf-8')),
+        mimetype='application/json',
+        resumable=True
+    )
+    
+    if files:
+        file_id = files[0]['id']
+        service.files().update(fileId=file_id, media_body=media).execute()
+    else:
+        file_metadata = {
+            'name': manifest_filename,
+            'parents': [folder_id]
+        }
+        service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+
+def download_remote_manifest(service, remote_node_name):
+    """Descarga y descifra el manifiesto de otro nodo desde Google Drive"""
+    folder_id = GDRIVE_CONFIG["folder_id"]
+    manifest_filename = f"manifest_{remote_node_name}.json"
+    
+    query = f"name = '{manifest_filename}' and '{folder_id}' in parents and trashed = false"
+    results = service.files().list(q=query, spaces='drive', fields='files(id)').execute()
+    files = results.get('files', [])
+    
+    if not files:
+        return None
+        
+    file_id = files[0]['id']
+    request = service.files().get_media(fileId=file_id)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+        
+    fh.seek(0)
+    encrypted_content = fh.read().decode('utf-8')
+    
+    decrypted_json_str = decrypt_text(encrypted_content, SYNC_SECRET)
+    if not decrypted_json_str:
+        return None
+        
+    return json.loads(decrypted_json_str)
+
 def get_or_create_folder(service, folder_name, parent_id):
-    """Busca una carpeta dentro de un directorio padre; si no existe, la crea."""
+    """Busca o crea una subcarpeta dentro del directorio padre en Google Drive"""
     query = f"name = '{folder_name}' and '{parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     results = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
     files = results.get('files', [])
@@ -72,107 +136,26 @@ def get_or_create_folder(service, folder_name, parent_id):
             'parents': [parent_id]
         }
         folder = service.files().create(body=file_metadata, fields='id').execute()
-        print(f"📁 Carpeta '{folder_name}' creada en Google Drive (ID: {folder.get('id')})")
         return folder.get('id')
 
 def get_or_create_cluster_state(service):
-    """Busca o crea el archivo cluster_state.json en la carpeta raíz compartida de Drive"""
-    folder_id = GDRIVE_CONFIG["folder_id"]
-    query = f"name = 'cluster_state.json' and '{folder_id}' in parents and trashed = false"
+    """Verifica o inicializa el estado global del clúster en Drive si es necesario"""
+    folder_id = GDRIVE_CONFIG.get("folder_id")
+    if not folder_id:
+        folder_id = get_or_create_root_folder(service)
     
-    results = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
-    files = results.get('files', [])
-    
-    if files:
-        return files[0]['id']
-    else:
-        initial_state = {
-            "locks": {},
-            "nodes": {
-                CURRENT_NODE["name"]: {"status": "active", "mailbox": CURRENT_NODE["mailbox"]}
-            }
-        }
-        media = MediaIoBaseUpload(
-            io.BytesIO(json.dumps(initial_state, indent=4).encode('utf-8')),
-            mimetype='application/json',
-            resumable=True
-        )
-        file_metadata = {
-            'name': 'cluster_state.json',
-            'parents': [folder_id]
-        }
-        file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-        print(f"🔒 Archivo cluster_state.json inicializado en la nube.")
-        return file.get('id')
+    # Podés asegurarte de crear una carpeta para buzones o estado global si lo requiere el clúster
+    return get_or_create_folder(service, "ClusterMailboxes", folder_id)
 
-def read_cluster_state(service, file_id):
-    """Lee el estado actual del clúster desde la nube"""
-    request = service.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    fh.seek(0)
-    return json.loads(fh.read().decode('utf-8'))
-
-def update_cluster_state(service, file_id, state_data):
-    """Actualiza de forma atómica el estado del clúster en la nube"""
-    media = MediaIoBaseUpload(
-        io.BytesIO(json.dumps(state_data, indent=4).encode('utf-8')),
-        mimetype='application/json',
-        resumable=True
-    )
-    service.files().update(fileId=file_id, media_body=media).execute()
-
-def upload_file_to_mailbox(service, file_path, mailbox_id, rel_path=None):
-    """Sube o actualiza un archivo local manteniendo su nombre original usando caché local"""
-    path = Path(file_path)
-    if not path.is_file():
-        return None
-        
-    file_name = path.name
-    cache = load_local_cache()
+def upload_file_to_mailbox(service, local_file_path, mailbox_folder_id):
+    """Sube un archivo plano (como las instrucciones JSON) al buzón correspondiente en Drive"""
+    path_obj = Path(local_file_path)
+    file_metadata = {
+        'name': path_obj.name,
+        'parents': [mailbox_folder_id]
+    }
     
-    # Usamos la ruta relativa como clave única para este archivo en la caché
-    cache_key = str(rel_path) if rel_path else file_name
-    existing_file_id = cache.get(cache_key)
-    
-    with open(path, 'rb') as f:
+    with open(path_obj, 'rb') as f:
         media = MediaIoBaseUpload(f, mimetype='application/octet-stream', resumable=True)
-        
-        if existing_file_id:
-            try:
-                # Si tenemos el ID en caché, actualizamos directamente sin duplicar
-                service.files().update(fileId=existing_file_id, media_body=media).execute()
-                print(f"☁️ Archivo actualizado en la nube (vía caché): {file_name} (ID: {existing_file_id})")
-                return existing_file_id
-            except Exception:
-                # Si el archivo fue borrado en Drive, limpiamos de la caché para recrearlo
-                cache.pop(cache_key, None)
-                
-        # Si no está en caché, creamos uno nuevo en el buzón plano
-        file_metadata = {
-            'name': file_name,
-            'parents': [mailbox_id]
-        }
-        created_file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-        file_id = created_file.get('id')
-        print(f"☁️ Archivo subido por primera vez a la nube: {file_name} (ID: {file_id})")
-        
-        # Guardar en la caché local
-        cache[cache_key] = file_id
-        save_local_cache(cache)
-        return file_id
-
-if __name__ == "__main__":
-    print(f"--- Probando conexión a Drive para el nodo: {CURRENT_NODE['name']} ---")
-    service = get_drive_service()
-    
-    root_folder = GDRIVE_CONFIG["folder_id"]
-    mailbox_id = get_or_create_folder(service, CURRENT_NODE["mailbox"], root_folder)
-    state_file_id = get_or_create_cluster_state(service)
-    cluster_state = read_cluster_state(service, state_file_id)
-
-    print(f"✅ Buzón verificado en nube (ID: {mailbox_id})")
-    print(f"✅ Estado del clúster cargado:", cluster_state)
+        file_result = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        return file_result.get('id')
