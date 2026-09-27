@@ -20,3 +20,4 @@ sync_rules.json
 *.log
 cmd_*.json
 *.json
+src/config.py
