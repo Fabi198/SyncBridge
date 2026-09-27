@@ -15,8 +15,9 @@ from dotenv import load_dotenv
 import tkinter as tk
 from tkinter import messagebox, ttk
 import logging
+from src.consumer import start_consumer_loop
 
-# 1. Ejecutar el asistente de configuración inicial si no existe el .env
+# 1. Ejecutar el asistente de configuración inicial si no existe el .env o config
 from src.setup import run_setup_wizard
 if not run_setup_wizard():
     sys.exit(0)
@@ -121,12 +122,17 @@ def main():
         sys.exit(1)
 
     try:
-        # 🚀 1. Arrancar el Watchdog de sincronización en segundo plano (demonio)
+        # 🚀 1. Arrancar el Watchdog de envío local en segundo plano (demonio)
         logging.info("👀 Iniciando vigilante Watchdog...")
         watcher_thread = threading.Thread(target=start_watching, daemon=True)
         watcher_thread.start()
 
-        # 🖥️ 2. Iniciar el System Tray en el hilo principal (bloqueante saludable)
+        # 📥 2. Arrancar el Consumidor de recepción del buzón en segundo plano (demonio)
+        logging.info("📥 Iniciando motor Consumidor de buzón...")
+        consumer_thread = threading.Thread(target=start_consumer_loop, daemon=True, args=(15,))
+        consumer_thread.start()
+
+        # 🖥️ 3. Iniciar el System Tray en el hilo principal (bloqueante saludable)
         logging.info("🖥️ Iniciando System Tray...")
         init_system_tray()
         

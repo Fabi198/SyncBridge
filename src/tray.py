@@ -9,6 +9,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
 from src.config import BASE_PATH, CURRENT_NODE
+from src.consumer import force_sync_now
 
 def create_dynamic_icon():
     image = Image.new('RGBA', (64, 64), color=(15, 82, 186, 255))
@@ -92,6 +93,7 @@ def init_system_tray():
         pystray.MenuItem("📜 Ver registro de actividad", lambda: open_activity_log()),
         pystray.MenuItem("⚙️ Configurar carpetas...", lambda: open_sync_gui_isolated()),
         pystray.MenuItem("📁 Abrir carpeta base", lambda: open_base_folder()),
+        pystray.MenuItem("🔄 Sincronizar ahora", lambda: force_sync_now()),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Salir de SyncBridge", lambda icon, item: stop_app(icon))
     )

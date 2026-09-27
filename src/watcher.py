@@ -20,10 +20,10 @@ from src.gdrive import (
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 class SyncHandler(FileSystemEventHandler):
-    def __init__(self, service, mailbox_id):
+    def __init__(self, service, root_folder_id):
         super().__init__()
         self.service = service
-        self.mailbox_id = mailbox_id
+        self.root_folder_id = root_folder_id
         self.is_muted = False
         self.file_sizes = {}
         self.is_initialized = False
@@ -32,7 +32,7 @@ class SyncHandler(FileSystemEventHandler):
         # Archivo local consolidado para acumular instrucciones y no spamear la API
         self.queue_file = CURRENT_NODE["base_path"] / "cluster_queue.json"
         
-        # Hilo en segundo plano para enviar la cola acumulada cada pocos segundos
+        # Hilo en segundo plano para enviar la cola acumulada a todos los nodos del clúster cada pocos segundos
         self.batch_thread = threading.Thread(target=self._batch_sender_loop, daemon=True)
         self.batch_thread.start()
 
@@ -52,7 +52,7 @@ class SyncHandler(FileSystemEventHandler):
         name_lower = path_obj.name.lower()
         if name_lower in {"desktop.ini", "thumbs.db", "pagefile.sys", "swapfile.sys", "hiberfil.sys", "cluster_queue.json", "syncbridge.log"}:
             return True
-        if name_lower.startswith("batch_cmd_"):
+        if name_lower.startswith("batch_cmd_") or name_lower.startswith("cluster_instructions_"):
             return True
             
         ignored_extensions = {".tmp", ".log", ".crdownload", ".part", ".etl", ".sys", ".lnk"}
@@ -61,6 +61,19 @@ class SyncHandler(FileSystemEventHandler):
             
         if "~$" in path_obj.name:
             return True
+            
+        # 📂 Filtrar según las subcarpetas seleccionadas en el asistente
+        included_subfolders = CURRENT_NODE.get("included_subfolders", [])
+        if included_subfolders:
+            try:
+                base_path = CURRENT_NODE["base_path"]
+                rel = path_obj.relative_to(base_path)
+                top_folder = rel.parts[0] if rel.parts else ""
+                # Si el archivo está en la raíz de la carpeta base (no en subcarpeta) o en una no seleccionada, ignorar
+                if top_folder and top_folder not in included_subfolders:
+                    return True
+            except ValueError:
+                pass
             
         return False
 
@@ -126,7 +139,7 @@ class SyncHandler(FileSystemEventHandler):
             logging.error(f"❌ Error al registrar instrucción '{action}': {e}")
 
     def _batch_sender_loop(self):
-        """Fusiona la cola local con el archivo maestro en Google Drive usando archivos temporales únicos"""
+        """Distribuye la cola local a los buzones de TODOS los demás nodos del clúster (P2P multi-nodo)"""
         from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
         import io
 
@@ -140,7 +153,6 @@ class SyncHandler(FileSystemEventHandler):
                     if not self.queue_file.exists() or self.queue_file.stat().st_size == 0:
                         continue
                     
-                    # Leer las nuevas órdenes locales y vaciar la cola local
                     new_instructions = json.loads(self.queue_file.read_text(encoding='utf-8'))
                     self.queue_file.unlink()
                 except Exception:
@@ -148,54 +160,62 @@ class SyncHandler(FileSystemEventHandler):
 
             temp_path = None
             try:
-                # 1. Buscar si ya existe 'cluster_instructions.json' en el buzón de Drive
-                query = f"name = 'cluster_instructions.json' and '{self.mailbox_id}' in parents and trashed = false"
-                results = self.service.files().list(q=query, spaces='drive', fields='files(id)').execute().get('files', [])
-                
-                # Usar un nombre único temporal por cada lote para evitar bloqueos de Windows
-                temp_dir = Path(os.environ.get('TEMP', CURRENT_NODE["base_path"]))
-                temp_path = temp_dir / f"cluster_instructions_{int(time.time() * 1000)}.json"
+                # 1. Leer el estado del clúster para obtener la lista actualizada de nodos
+                cluster_state = get_or_create_cluster_state(self.service)
+                node_names = cluster_state.get("node_names", [])
+                current_name = CURRENT_NODE["name"]
 
-                if results:
-                    # 2A. Si ya existe, descargarlo para fusionar las nuevas órdenes
-                    file_id = results[0]['id']
-                    request = self.service.files().get_media(fileId=file_id)
-                    fh = io.BytesIO()
-                    downloader = MediaIoBaseDownload(fh, request)
-                    done = False
-                    while not done:
-                        _, done = downloader.next_chunk()
+                # 2. Iterar sobre todos los demás nodos de la red P2P (excluyéndonos a nosotros mismos)
+                for target_node in node_names:
+                    if target_node == current_name:
+                        continue
+
+                    mailbox_name = f"mailbox_{target_node}"
+                    target_mailbox_id = get_or_create_folder(self.service, mailbox_name, self.root_folder_id)
+
+                    # 3. Buscar si ya existe 'cluster_instructions.json' en el buzón de ese nodo específico
+                    query = f"name = 'cluster_instructions.json' and '{target_mailbox_id}' in parents and trashed = false"
+                    results = self.service.files().list(q=query, spaces='drive', fields='files(id)').execute().get('files', [])
                     
-                    try:
-                        existing_instructions = json.loads(fh.getvalue().decode('utf-8'))
-                        if not isinstance(existing_instructions, list):
+                    temp_dir = Path(os.environ.get('TEMP', CURRENT_NODE["base_path"]))
+                    temp_path = temp_dir / f"cluster_instructions_{target_node}_{int(time.time() * 1000)}.json"
+
+                    if results:
+                        file_id = results[0]['id']
+                        request = self.service.files().get_media(fileId=file_id)
+                        fh = io.BytesIO()
+                        downloader = MediaIoBaseDownload(fh, request)
+                        done = False
+                        while not done:
+                            _, done = downloader.next_chunk()
+                        
+                        try:
+                            existing_instructions = json.loads(fh.getvalue().decode('utf-8'))
+                            if not isinstance(existing_instructions, list):
+                                existing_instructions = []
+                        except Exception:
                             existing_instructions = []
-                    except Exception:
-                        existing_instructions = []
 
-                    # Fusionar órdenes existentes + nuevas
-                    combined_instructions = existing_instructions + new_instructions
-                    temp_path.write_text(json.dumps(combined_instructions, indent=4), encoding='utf-8')
+                        combined_instructions = existing_instructions + new_instructions
+                        temp_path.write_text(json.dumps(combined_instructions, indent=4), encoding='utf-8')
 
-                    # Actualizar el archivo existente en Google Drive
-                    media = MediaFileUpload(str(temp_path), mimetype='application/json', resumable=True)
-                    self.service.files().update(fileId=file_id, media_body=media).execute()
-                    logging.info("☁️ Archivo maestro 'cluster_instructions.json' actualizado en la nube con nuevas órdenes.")
-                else:
-                    # 2B. Si no existe, crearlo por primera vez en el buzón
-                    temp_path.write_text(json.dumps(new_instructions, indent=4), encoding='utf-8')
-                    
-                    file_metadata = {
-                        'name': 'cluster_instructions.json',
-                        'parents': [self.mailbox_id]
-                    }
-                    media = MediaFileUpload(str(temp_path), mimetype='application/json', resumable=True)
-                    self.service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-                    logging.info("☁️ Archivo maestro 'cluster_instructions.json' creado por primera vez en la nube.")
+                        media = MediaFileUpload(str(temp_path), mimetype='application/json', resumable=True)
+                        self.service.files().update(fileId=file_id, media_body=media).execute()
+                        logging.info(f"☁️ Órdenes enviadas y fusionadas en el buzón de [{target_node}].")
+                    else:
+                        temp_path.write_text(json.dumps(new_instructions, indent=4), encoding='utf-8')
+                        
+                        file_metadata = {
+                            'name': 'cluster_instructions.json',
+                            'parents': [target_mailbox_id]
+                        }
+                        media = MediaFileUpload(str(temp_path), mimetype='application/json', resumable=True)
+                        self.service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                        logging.info(f"☁️ Órdenes enviadas al nuevo buzón de [{target_node}].")
 
             except Exception as e:
-                logging.error(f"❌ Error al actualizar el archivo maestro en la nube: {e}")
-                # Si falla, devolvemos las órdenes a la cola local para no perderlas
+                logging.error(f"❌ Error al distribuir las instrucciones a los nodos: {e}")
+                # Devolver las órdenes a la cola local si falla la red para no perderlas
                 with self.queue_lock:
                     try:
                         if self.queue_file.exists():
@@ -206,7 +226,6 @@ class SyncHandler(FileSystemEventHandler):
                     except Exception:
                         pass
             finally:
-                # Limpieza segura del archivo temporal local (con reintento si Windows lo retiene un segundo)
                 if temp_path and temp_path.exists():
                     for _ in range(3):
                         try:
@@ -216,7 +235,6 @@ class SyncHandler(FileSystemEventHandler):
                             time.sleep(0.5)
 
     def _prompt_new_folder(self, folder_path):
-        """Ventana emergente en hilo separado para consultar si desea incorporar nueva carpeta"""
         def show():
             try:
                 root = tk.Tk()
@@ -247,7 +265,6 @@ class SyncHandler(FileSystemEventHandler):
                 return
 
             if path_obj.exists() and path_obj.is_file():
-                # 1. Esperar a que el archivo esté libre para medir
                 for _ in range(5):
                     try:
                         self.file_sizes[event.src_path] = path_obj.stat().st_size
@@ -259,11 +276,14 @@ class SyncHandler(FileSystemEventHandler):
 
                 logging.info(f"🟢 [CREACIÓN] Archivo nuevo detectado: {event.src_path}")
                 
-                # 2. Reintentar la subida a Drive si el navegador aún lo tiene bloqueado
+                # Como ahora subimos a los buzones de los demás nodos en batch, 
+                # subimos primero el archivo al root o manejamos su referencia. 
+                # (Aquí reutilizamos upload_file_subiendo al root folder para que esté disponible para todos)
                 file_id = None
                 for _ in range(5):
                     try:
-                        file_id = upload_file_to_mailbox(self.service, event.src_path, self.mailbox_id)
+                        # Subimos el archivo al root compartido para que los demás puedan consumirlo
+                        file_id = upload_file_to_mailbox(self.service, event.src_path, self.root_folder_id)
                         break
                     except (PermissionError, OSError):
                         time.sleep(1)
@@ -309,7 +329,7 @@ class SyncHandler(FileSystemEventHandler):
             file_id = None
             for _ in range(5):
                 try:
-                    file_id = upload_file_to_mailbox(self.service, event.src_path, self.mailbox_id)
+                    file_id = upload_file_to_mailbox(self.service, event.src_path, self.root_folder_id)
                     break
                 except (PermissionError, OSError):
                     time.sleep(1)
@@ -375,10 +395,10 @@ def start_watching():
     if not root_folder:
         root_folder = GDRIVE_CONFIG.get("folder_id")
 
-    mailbox_id = get_or_create_folder(service, CURRENT_NODE["mailbox"], root_folder)
+    # Asegurar que existan los buzones y el estado del clúster
     get_or_create_cluster_state(service)
 
-    event_handler = SyncHandler(service, mailbox_id)
+    event_handler = SyncHandler(service, root_folder)
     event_handler.perform_baseline_scan(path_to_watch)
 
     observer = Observer()
@@ -386,7 +406,7 @@ def start_watching():
     
     observer.start()
     logging.info(f"==================================================")
-    logging.info(f" 👀 WATCHDOG + COLA CONSOLIDADA ACTIVO: {CURRENT_NODE['name']}")
+    logging.info(f" 👀 WATCHDOG + MULTI-NODE SENDER ACTIVO: {CURRENT_NODE['name']}")
     logging.info(f" 📂 Vigilando ruta: {path_to_watch}")
     logging.info(f"==================================================")
     
