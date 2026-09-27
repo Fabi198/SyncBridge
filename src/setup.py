@@ -2,14 +2,15 @@ import os
 import sys
 import io
 import json
-import time
 import logging
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, filedialog
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 CONFIG_FILE = Path("src/config.py")
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
@@ -18,7 +19,7 @@ class SyncBridgeWizard(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("SyncBridge - Asistente de Configuración P2P")
-        self.geometry("560x480")
+        self.geometry("560x520")
         self.resizable(False, False)
         
         self.service = None
@@ -34,6 +35,9 @@ class SyncBridgeWizard(tk.Tk):
         self.node1_name = tk.StringVar(value="MiPC")
         self.node2_name = tk.StringVar(value="CompuOficina")
         self.base_path_var = tk.StringVar(value="D:\\")
+        
+        # Variables para los checkboxes de subcarpetas
+        self.subfolder_vars = {}
 
         self.container = tk.Frame(self, padx=25, pady=25)
         self.container.pack(fill="both", expand=True)
@@ -189,7 +193,7 @@ class SyncBridgeWizard(tk.Tk):
 
         self.clear_container()
         tk.Label(self.container, text=f"Carpeta Base para '{self.selected_node.get()}'", font=("Arial", 14, "bold")).pack(anchor="w", pady=5)
-        tk.Label(self.container, text="Seleccioná la carpeta local que querés sincronizar:", font=("Arial", 9)).pack(anchor="w", pady=5)
+        tk.Label(self.container, text="Seleccioná la carpeta local principal que querés sincronizar:", font=("Arial", 9)).pack(anchor="w", pady=5)
 
         frame_path = tk.Frame(self.container, pady=15)
         frame_path.pack(anchor="w", fill="x")
@@ -197,23 +201,63 @@ class SyncBridgeWizard(tk.Tk):
         tk.Entry(frame_path, textvariable=self.base_path_var, font=("Arial", 10), width=45).pack(side="left", padx=(0, 10))
         tk.Button(frame_path, text="Examinar...", command=lambda: self.base_path_var.set(filedialog.askdirectory() or self.base_path_var.get()), font=("Arial", 9)).pack(side="left")
 
-        tk.Button(self.container, text="Finalizar e Instalar 🚀", bg="#28a745", fg="white", font=("Arial", 10, "bold"), padx=15, pady=5, command=self.save_and_finish).pack(anchor="e", pady=(30, 0))
+        tk.Button(self.container, text="Siguiente ➡️", bg="#0078D7", fg="white", font=("Arial", 10, "bold"), padx=15, pady=5, command=self.show_subfolder_selection_screen).pack(anchor="e", pady=(30, 0))
+
+    def show_subfolder_selection_screen(self):
+        base_path_str = self.base_path_var.get().strip()
+        if not base_path_str:
+            messagebox.showwarning("Ruta vacía", "Por favor, seleccioná una ruta válida.")
+            return
+
+        base_path = Path(base_path_str)
+        if not base_path.exists():
+            try:
+                base_path.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo crear la carpeta base:\n{e}")
+                return
+
+        # Escanear subcarpetas directas dentro de la carpeta base
+        try:
+            subfolders = [f.name for f in base_path.iterdir() if f.is_dir() and not f.name.startswith('.')]
+        except Exception:
+            subfolders = []
+
+        self.clear_container()
+        tk.Label(self.container, text="Seleccionar Subcarpetas a Sincronizar", font=("Arial", 14, "bold")).pack(anchor="w", pady=5)
+        tk.Label(self.container, text="Marcá las subcarpetas que querés incluir en la sincronización P2P:", font=("Arial", 9)).pack(anchor="w", pady=5)
+
+        # Contenedor con scroll o marco para los checkboxes
+        frame_checks = tk.Frame(self.container, pady=10)
+        frame_checks.pack(anchor="w", fill="both", expand=True)
+
+        self.subfolder_vars.clear()
+
+        if not subfolders:
+            tk.Label(frame_checks, text="(No se encontraron subcarpetas directas. Se sincronizará toda la raíz).", font=("Arial", 9, "italic"), fg="gray").pack(anchor="w", pady=10)
+        else:
+            for sub in subfolders:
+                var = tk.BooleanVar(value=True) # Por defecto marcadas
+                self.subfolder_vars[sub] = var
+                cb = tk.Checkbutton(frame_checks, text=sub, variable=var, font=("Arial", 10))
+                cb.pack(anchor="w", pady=2)
+
+        tk.Button(self.container, text="Finalizar e Instalar 🚀", bg="#28a745", fg="white", font=("Arial", 10, "bold"), padx=15, pady=5, command=self.save_and_finish).pack(anchor="e", pady=(20, 0))
 
     def save_and_finish(self):
         node_name = self.selected_node.get()
         base_path_str = self.base_path_var.get().strip()
-        if not base_path_str:
-            return
-
         base_path = Path(base_path_str)
-        base_path.mkdir(parents=True, exist_ok=True)
         mailbox_name = f"mailbox_{node_name}"
         safe_base_path = str(base_path).replace("\\", "/")
 
-# Obtener los valores ingresados en la pantalla de credenciales
+        # Obtener lista de subcarpetas seleccionadas por el usuario
+        selected_subfolders = [sub for sub, var in self.subfolder_vars.items() if var.get()]
+
         client_id_val = self.client_id_var.get().strip()
         client_secret_val = self.client_secret_var.get().strip()
 
+        # Guardar configuración incluyendo las subcarpetas elegidas
         config_content = f'''# Archivo de configuración autogenerado por el Asistente de SyncBridge
 from pathlib import Path
 
@@ -222,7 +266,8 @@ BASE_PATH = Path(r"{safe_base_path}")
 CURRENT_NODE = {{
     "name": "{node_name}",
     "mailbox": "{mailbox_name}",
-    "base_path": BASE_PATH
+    "base_path": BASE_PATH,
+    "included_subfolders": {selected_subfolders}
 }}
 
 GDRIVE_CONFIG = {{
@@ -238,29 +283,36 @@ SYNC_SECRET = "sync_bridge_secure_token"
             CONFIG_FILE.write_text(config_content, encoding='utf-8')
 
             self.cluster_state["nodes_configured"][node_name] = True
-            temp_path = Path(os.environ.get('TEMP', '.')) / f"cluster_state_{int(time.time() * 1000)}.json"
-            temp_path.write_text(json.dumps(self.cluster_state, indent=4), encoding='utf-8')
+            
+            json_data = json.dumps(self.cluster_state, indent=4).encode('utf-8')
+            fh = io.BytesIO(json_data)
+            media = MediaIoBaseUpload(fh, mimetype='application/json', resumable=True)
 
-            media = MediaFileUpload(str(temp_path), mimetype='application/json', resumable=True)
-            if self.state_file_id:
+            state_query = f"name = 'cluster_state.json' and '{self.root_folder_id}' in parents and trashed = false"
+            state_files = self.service.files().list(q=state_query, spaces='drive', fields='files(id)').execute().get('files', [])
+
+            if state_files:
+                self.state_file_id = state_files[0]['id']
+                for extra in state_files[1:]:
+                    try:
+                        self.service.files().delete(fileId=extra['id']).execute()
+                    except Exception:
+                        pass
+                
                 self.service.files().update(fileId=self.state_file_id, media_body=media).execute()
             else:
                 file_metadata = {'name': 'cluster_state.json', 'parents': [self.root_folder_id]}
-                self.service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                created = self.service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                self.state_file_id = created.get('id')
 
-            if temp_path.exists():
-                temp_path.unlink()
-
-            messagebox.showinfo("¡Instalación Completa!", f"Configurado como '{node_name}'. ¡Ya podés iniciar!")
+            messagebox.showinfo("¡Instalación Completa!", f"Este equipo quedó configurado como '{node_name}'.\n¡Ya podés iniciar!")
             self.destroy()
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo guardar:\n{e}")
 
 def run_setup_wizard() -> bool:
-    """Función puente requerida por main.py para verificar o invocar el asistente"""
     if CONFIG_FILE.exists():
         try:
-            # Validar si el config tiene los datos clave llenos
             sys.path.append(str(Path(__file__).parent.parent))
             from src.config import GDRIVE_CONFIG, CURRENT_NODE
             if GDRIVE_CONFIG.get("folder_id") and CURRENT_NODE.get("name"):
@@ -268,11 +320,9 @@ def run_setup_wizard() -> bool:
         except Exception:
             pass
 
-    # Si no existe o está incompleto, lanzamos la interfaz gráfica
     app = SyncBridgeWizard()
     app.mainloop()
 
-    # Verificar de nuevo si el usuario completó la instalación
     if CONFIG_FILE.exists():
         try:
             from src.config import GDRIVE_CONFIG, CURRENT_NODE
