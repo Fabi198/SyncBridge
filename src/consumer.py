@@ -89,7 +89,7 @@ def process_mailbox():
                         target_path = BASE_PATH / rel_path
 
                         if action == "CREATE_OR_UPDATE" and cloud_file_id:
-                            # Descargar el archivo real desde Google Drive usando el file_id compartido
+                            # 1. Descargar el archivo real desde Google Drive usando el file_id compartido
                             req_file = service.files().get_media(fileId=cloud_file_id)
                             fh_file = io.BytesIO()
                             dl_file = MediaIoBaseDownload(fh_file, req_file)
@@ -101,6 +101,13 @@ def process_mailbox():
                             target_path.write_bytes(fh_file.getvalue())
                             logging.info(f"✅ Sincronizado localmente (Actualizado/Creado): {rel_path}")
 
+                            # 2. 🧹 LIMPIEZA TOTAL: Borrar definitivamente el archivo compartido de la nube (incluyendo papelera)
+                            try:
+                                service.files().delete(fileId=cloud_file_id).execute()
+                                logging.info(f"🗑️ Archivo temporal de nube eliminado permanentemente: {cloud_file_id}")
+                            except Exception as e:
+                                logging.warning(f"⚠️ No se pudo eliminar el archivo de la nube {cloud_file_id}: {e}")
+
                         elif action in ["DELETE", "DELETE_DIR"]:
                             if target_path.exists():
                                 if target_path.is_file():
@@ -110,9 +117,9 @@ def process_mailbox():
                                     shutil.rmtree(target_path, ignore_errors=True)
                                 logging.info(f"🗑️ Sincronizado localmente (Eliminado): {rel_path}")
 
-                    # Una vez procesadas todas las instrucciones, borramos el archivo del buzón
+                    # 3. 🧹 LIMPIEZA TOTAL: Borrar el archivo 'cluster_instructions.json' del buzón de forma permanente
                     service.files().delete(fileId=file_id).execute()
-                    logging.info(f"🗑️ Archivo maestro 'cluster_instructions.json' consumido y eliminado del buzón.")
+                    logging.info(f"🗑️ Archivo maestro 'cluster_instructions.json' consumido y eliminado permanentemente de la nube.")
 
             except Exception as e:
                 logging.error(f"❌ Error al procesar el archivo del buzón {file_name}: {e}")
