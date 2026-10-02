@@ -139,7 +139,7 @@ class SyncHandler(FileSystemEventHandler):
             logging.error(f"❌ Error al registrar instrucción '{action}': {e}")
 
     def _batch_sender_loop(self):
-        """Distribuye la cola local a los buzones de TODOS los demás nodos del clúster (P2P multi-nodo)"""
+        """Distribuye la cola local a los buzones de TODOS los demás nodos del clúster directamente en la raíz"""
         from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
         import io
 
@@ -177,7 +177,6 @@ class SyncHandler(FileSystemEventHandler):
                     
                     try:
                         state_data = json.loads(fh.getvalue().decode('utf-8'))
-                        # Extraer las claves o nombres de los nodos configurados en el estado
                         nodes_configured = state_data.get("nodes_configured", {})
                         node_names = list(nodes_configured.keys())
                     except Exception:
@@ -185,18 +184,18 @@ class SyncHandler(FileSystemEventHandler):
 
                 current_name = CURRENT_NODE["name"]
 
-                # Asegurar que exista la carpeta principal de buzones
-                mailboxes_parent_id = get_or_create_cluster_state(self.service)
+                # La raíz de SyncBridge actúa como el contenedor directo de los buzones
+                root_mailboxes_id = get_or_create_cluster_state(self.service)
 
-                # 2. Iterar sobre todos los demás nodos de la red P2P (excluyéndonos a nosotros mismos)
+                # 2. Iterar sobre todos los demás nodos de la red P2P
                 for target_node in node_names:
                     if target_node == current_name:
                         continue
 
                     mailbox_name = f"mailbox_{target_node}"
-                    target_mailbox_id = get_or_create_folder(self.service, mailbox_name, mailboxes_parent_id)
+                    target_mailbox_id = get_or_create_folder(self.service, mailbox_name, root_mailboxes_id)
 
-                    # 3. Buscar si ya existe 'cluster_instructions.json' en el buzón de ese nodo específico
+                    # 3. Buscar si ya existe 'cluster_instructions.json' en el buzón de ese nodo
                     query = f"name = 'cluster_instructions.json' and '{target_mailbox_id}' in parents and trashed = false"
                     results = self.service.files().list(q=query, spaces='drive', fields='files(id)').execute().get('files', [])
                     
@@ -224,7 +223,7 @@ class SyncHandler(FileSystemEventHandler):
 
                         media = MediaFileUpload(str(temp_path), mimetype='application/json', resumable=True)
                         self.service.files().update(fileId=file_id, media_body=media).execute()
-                        logging.info(f"☁️ Órdenes enviadas y fusionadas en el buzón de [{target_node}].")
+                        logging.info(f"☁️ Órdenes enviadas y fusionadas en el buzón directo de [{target_node}].")
                     else:
                         temp_path.write_text(json.dumps(new_instructions, indent=4), encoding='utf-8')
                         
@@ -234,11 +233,10 @@ class SyncHandler(FileSystemEventHandler):
                         }
                         media = MediaFileUpload(str(temp_path), mimetype='application/json', resumable=True)
                         self.service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-                        logging.info(f"☁️ Órdenes enviadas al nuevo buzón de [{target_node}].")
+                        logging.info(f"☁️ Órdenes enviadas al nuevo buzón directo de [{target_node}].")
 
             except Exception as e:
                 logging.error(f"❌ Error al distribuir las instrucciones a los nodos: {e}")
-                # Devolver las órdenes a la cola local si falla la red para no perderlas
                 with self.queue_lock:
                     try:
                         if self.queue_file.exists():

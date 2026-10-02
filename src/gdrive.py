@@ -139,13 +139,11 @@ def get_or_create_folder(service, folder_name, parent_id):
         return folder.get('id')
 
 def get_or_create_cluster_state(service):
-    """Verifica o inicializa el estado global del clúster en Drive si es necesario"""
+    """Retorna directamente el ID de la carpeta raíz de SyncBridge (eliminando ClusterMailboxes)"""
     folder_id = GDRIVE_CONFIG.get("folder_id")
     if not folder_id:
         folder_id = get_or_create_root_folder(service)
-    
-    # Podés asegurarte de crear una carpeta para buzones o estado global si lo requiere el clúster
-    return get_or_create_folder(service, "ClusterMailboxes", folder_id)
+    return folder_id
 
 def upload_file_to_mailbox(service, local_file_path, mailbox_folder_id):
     """Sube un archivo plano (como las instrucciones JSON) al buzón correspondiente en Drive"""
