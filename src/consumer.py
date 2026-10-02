@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-from src.config import BASE_PATH, CURRENT_NODE, GDRIVE_CONFIG
+from src.config import BASE_PATH, CURRENT_NODE, GDRIVE_CONFIG, NETWORK_PROCESSED_PATHS
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -117,7 +117,7 @@ def process_mailbox():
                             logging.info(f"🎯 [CONSUMIDOR] Ruta de destino calculada localmente: {target_path}")
 
                             if action == "CREATE_OR_UPDATE" and cloud_file_id:
-                                logging.info(f"☁️ [CONSUMIDOR] Descargando archivo adjunto de Drive (ID: {cloud_file_id}) para replicar en: {target_path}")
+                                logging.info(f"☁️️ [CONSUMIDOR] Descargando archivo adjunto de Drive (ID: {cloud_file_id}) para replicar en: {target_path}")
                                 
                                 # 1. Descargar el archivo real desde Google Drive usando el file_id compartido
                                 req_file = service.files().get_media(fileId=cloud_file_id)
@@ -131,6 +131,10 @@ def process_mailbox():
                                 target_path.parent.mkdir(parents=True, exist_ok=True)
                                 logging.info(f"📁 [CONSUMIDOR] Directorio contenedor asegurado: {target_path.parent}")
                                 
+                                # 🛡️ REGISTRAR EN EL ESCUDO GLOBAL ANTES DE ESCRIBIR PARA EVITAR ECO EN WATCHDOG
+                                abs_target_str = str(target_path.resolve())
+                                NETWORK_PROCESSED_PATHS.add(abs_target_str)
+
                                 # Escribir el archivo localmente
                                 target_path.write_bytes(fh_file.getvalue())
                                 logging.info(f"✅ [CONSUMIDOR] ¡ÉXITO! Archivo sincronizado y escrito localmente: {target_path} (Relativo: {rel_path})")
@@ -145,6 +149,10 @@ def process_mailbox():
                             elif action in ["DELETE", "DELETE_DIR"]:
                                 logging.info(f"🗑️ [CONSUMIDOR] Ejecutando orden de eliminación para: {target_path}")
                                 if target_path.exists():
+                                    # 🛡️ REGISTRAR EN EL ESCUDO GLOBAL ANTES DE BORRAR PARA EVITAR ECO EN WATCHDOG
+                                    abs_target_str = str(target_path.resolve())
+                                    NETWORK_PROCESSED_PATHS.add(abs_target_str)
+
                                     if target_path.is_file():
                                         target_path.unlink()
                                     elif target_path.is_dir():
@@ -159,7 +167,7 @@ def process_mailbox():
 
                     # 3. Borrar el archivo 'cluster_instructions.json' del buzón de forma permanente una vez procesado
                     service.files().delete(fileId=file_id).execute()
-                    logging.info(f"🗑️️ [CONSUMIDOR] Archivo maestro 'cluster_instructions.json' consumido y eliminado de la nube.")
+                    logging.info(f"🗑 [CONSUMIDOR] Archivo maestro 'cluster_instructions.json' consumido y eliminado de la nube.")
 
             except Exception as e:
                 logging.error(f"❌ [CONSUMIDOR] Error al procesar el contenido del archivo {file_name}: {e}")

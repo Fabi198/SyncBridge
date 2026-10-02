@@ -8,7 +8,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import tkinter as tk
 from tkinter import messagebox
-from src.config import CURRENT_NODE, GDRIVE_CONFIG
+from src.config import CURRENT_NODE, GDRIVE_CONFIG, NETWORK_PROCESSED_PATHS
 from src.gdrive import (
     get_drive_service,
     get_or_create_root_folder,
@@ -35,6 +35,21 @@ class SyncHandler(FileSystemEventHandler):
         # Hilo en segundo plano para enviar la cola acumulada a todos los nodos del clúster cada pocos segundos
         self.batch_thread = threading.Thread(target=self._batch_sender_loop, daemon=True)
         self.batch_thread.start()
+
+    def _check_and_bypass_network_event(self, event_path) -> bool:
+        """
+        Verifica si el evento fue producido por el consumidor de la red.
+        Si es así, lo ignora y limpia la ruta del conjunto al instante para liberar futuros cambios del usuario.
+        """
+        try:
+            abs_path_str = str(Path(event_path).resolve())
+            if abs_path_str in NETWORK_PROCESSED_PATHS:
+                NETWORK_PROCESSED_PATHS.remove(abs_path_str)
+                logging.debug(f"🔇 [WATCHDOG] Ignorando eco de red y liberando ruta: {event_path}")
+                return True
+        except Exception:
+            pass
+        return False
 
     def _is_ignorable(self, path_str: str) -> bool:
         path_lower = path_str.lower()
@@ -69,7 +84,6 @@ class SyncHandler(FileSystemEventHandler):
                 base_path = CURRENT_NODE["base_path"]
                 rel = path_obj.relative_to(base_path)
                 top_folder = rel.parts[0] if rel.parts else ""
-                # Si el archivo está en la raíz de la carpeta base (no en subcarpeta) o en una no seleccionada, ignorar
                 if top_folder and top_folder not in included_subfolders:
                     return True
             except ValueError:
@@ -160,7 +174,6 @@ class SyncHandler(FileSystemEventHandler):
 
             temp_path = None
             try:
-                # 1. Buscar y descargar el archivo 'cluster_state.json' real desde Google Drive
                 cluster_folder_id = get_or_create_root_folder(self.service)
                 state_query = f"name = 'cluster_state.json' and '{cluster_folder_id}' in parents and trashed = false"
                 state_files = self.service.files().list(q=state_query, spaces='drive', fields='files(id)').execute().get('files', [])
@@ -183,11 +196,8 @@ class SyncHandler(FileSystemEventHandler):
                         node_names = []
 
                 current_name = CURRENT_NODE["name"]
-
-                # La raíz de SyncBridge actúa como el contenedor directo de los buzones
                 root_mailboxes_id = get_or_create_cluster_state(self.service)
 
-                # 2. Iterar sobre todos los demás nodos de la red P2P
                 for target_node in node_names:
                     if target_node == current_name:
                         continue
@@ -195,7 +205,6 @@ class SyncHandler(FileSystemEventHandler):
                     mailbox_name = f"mailbox_{target_node}"
                     target_mailbox_id = get_or_create_folder(self.service, mailbox_name, root_mailboxes_id)
 
-                    # 3. Buscar si ya existe 'cluster_instructions.json' en el buzón de ese nodo
                     query = f"name = 'cluster_instructions.json' and '{target_mailbox_id}' in parents and trashed = false"
                     results = self.service.files().list(q=query, spaces='drive', fields='files(id)').execute().get('files', [])
                     
@@ -277,6 +286,10 @@ class SyncHandler(FileSystemEventHandler):
         if not self.is_initialized or self.is_muted or self._is_ignorable(event.src_path):
             return
         
+        # 🛡️ Validar si el evento fue generado por el consumidor de la red
+        if self._check_and_bypass_network_event(event.src_path):
+            return
+        
         try:
             path_obj = Path(event.src_path)
             
@@ -297,13 +310,9 @@ class SyncHandler(FileSystemEventHandler):
 
                 logging.info(f"🟢 [CREACIÓN] Archivo nuevo detectado: {event.src_path}")
                 
-                # Como ahora subimos a los buzones de los demás nodos en batch, 
-                # subimos primero el archivo al root o manejamos su referencia. 
-                # (Aquí reutilizamos upload_file_subiendo al root folder para que esté disponible para todos)
                 file_id = None
                 for _ in range(5):
                     try:
-                        # Subimos el archivo al root compartido para que los demás puedan consumirlo
                         file_id = upload_file_to_mailbox(self.service, event.src_path, self.root_folder_id)
                         break
                     except (PermissionError, OSError):
@@ -322,6 +331,10 @@ class SyncHandler(FileSystemEventHandler):
 
     def on_modified(self, event):
         if not self.is_initialized or self.is_muted or event.is_directory or self._is_ignorable(event.src_path):
+            return
+        
+        # 🛡️ Validar si el evento fue generado por el consumidor de la red
+        if self._check_and_bypass_network_event(event.src_path):
             return
         
         try:
@@ -394,6 +407,10 @@ class SyncHandler(FileSystemEventHandler):
         if not self.is_initialized or self.is_muted or self._is_ignorable(event.src_path):
             return
         
+        # 🛡️ Validar si el evento fue generado por el consumidor de la red
+        if self._check_and_bypass_network_event(event.src_path):
+            return
+        
         if event.src_path in self.file_sizes:
             del self.file_sizes[event.src_path]
 
@@ -416,7 +433,6 @@ def start_watching():
     if not root_folder:
         root_folder = GDRIVE_CONFIG.get("folder_id")
 
-    # Asegurar que existan los buzones y el estado del clúster
     get_or_create_cluster_state(service)
 
     event_handler = SyncHandler(service, root_folder)
