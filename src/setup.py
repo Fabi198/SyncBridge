@@ -33,8 +33,8 @@ class SyncBridgeWizard(tk.Tk):
         self.client_secret_var = tk.StringVar()
         self.selected_node = tk.StringVar()
         self.node1_name = tk.StringVar(value="MiPC")
-        self.node2_name = tk.StringVar(value="CompuOficina")
-        self.base_path_var = tk.StringVar(value="D:\\")
+        self.node2_name = tk.StringVar(value="Notebook")
+        self.base_path_var = tk.StringVar(value=str(Path.home() / "SyncBridge"))
         
         # Variables para los checkboxes de subcarpetas
         self.subfolder_vars = {}
