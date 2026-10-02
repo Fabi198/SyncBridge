@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox, filedialog
+from tkinter import messagebox, filedialog, ttk
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
@@ -224,25 +224,73 @@ class SyncBridgeWizard(tk.Tk):
             subfolders = []
 
         self.clear_container()
-        tk.Label(self.container, text="Seleccionar Subcarpetas a Sincronizar", font=("Arial", 14, "bold")).pack(anchor="w", pady=5)
-        tk.Label(self.container, text="Marcá las subcarpetas que querés incluir en la sincronización P2P:", font=("Arial", 9)).pack(anchor="w", pady=5)
+        
+        # Títulos
+        tk.Label(self.container, text="Seleccionar Subcarpetas a Sincronizar", font=("Arial", 14, "bold")).pack(anchor="w", pady=(0, 5))
+        tk.Label(self.container, text="Marcá las subcarpetas que querés incluir en la sincronización P2P:", font=("Arial", 9)).pack(anchor="w", pady=(0, 10))
 
-        # Contenedor con scroll o marco para los checkboxes
-        frame_checks = tk.Frame(self.container, pady=10)
-        frame_checks.pack(anchor="w", fill="both", expand=True)
+        # --- CONTENEDOR CON SCROLL PARA LOS CHECKBOXES ---
+        outer_frame = tk.Frame(self.container)
+        outer_frame.pack(fill="both", expand=True, pady=5)
+
+        canvas = tk.Canvas(outer_frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer_frame, orient="vertical", command=canvas.yview) if 'ttk' in globals() or 'ttk' in locals() else tk.Scrollbar(outer_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
         self.subfolder_vars.clear()
 
         if not subfolders:
-            tk.Label(frame_checks, text="(No se encontraron subcarpetas directas. Se sincronizará toda la raíz).", font=("Arial", 9, "italic"), fg="gray").pack(anchor="w", pady=10)
+            tk.Label(scrollable_frame, text="(No se encontraron subcarpetas directas. Se sincronizará toda la raíz).", font=("Arial", 9, "italic"), fg="gray").pack(anchor="w", pady=10)
         else:
             for sub in subfolders:
-                var = tk.BooleanVar(value=True) # Por defecto marcadas
+                var = tk.BooleanVar(value=True)  # Por defecto marcadas
                 self.subfolder_vars[sub] = var
-                cb = tk.Checkbutton(frame_checks, text=sub, variable=var, font=("Arial", 10))
-                cb.pack(anchor="w", pady=2)
+                cb = tk.Checkbutton(scrollable_frame, text=sub, variable=var, font=("Arial", 10))
+                cb.pack(anchor="w", pady=3)
 
-        tk.Button(self.container, text="Finalizar e Instalar 🚀", bg="#28a745", fg="white", font=("Arial", 10, "bold"), padx=15, pady=5, command=self.save_and_finish).pack(anchor="e", pady=(20, 0))
+        # --- BOTÓN FIJO ABAJO (Siempre visible) ---
+        btn_finish = tk.Button(
+            self.container, 
+            text="Finalizar e Instalar 🚀", 
+            bg="#28a745", 
+            fg="white", 
+            font=("Arial", 10, "bold"), 
+            padx=15, 
+            pady=8, 
+            command=self.save_and_finish
+        )
+        btn_finish.pack(anchor="e", pady=(15, 0))
+
+    def save_and_finish_tree(self):
+        # Recolectar rutas relativas o absolutas seleccionadas desde el árbol
+        base_path_str = self.base_path_var.get().strip()
+        base_path = Path(base_path_str)
+        
+        selected_subfolders = []
+        for node_id, data in self.tree_vars.items():
+            if data["selected"] and data["path"] != base_path:
+                try:
+                    rel_path = data["path"].relative_to(base_path)
+                    selected_subfolders.get if hasattr(selected_subfolders, "get") else selected_subfolders.append(str(rel_path))
+                except ValueError:
+                    pass
+
+        # Reutilizamos la lógica existente de guardado pasando las subcarpetas seleccionadas
+        # (Asegúrate de que 'save_and_finish' tome 'selected_subfolders' o actualiza las variables globales antes de llamarlo)
+        self.selected_subfolders_final = selected_subfolders
+        self.save_and_finish()
+
 
     def save_and_finish(self):
         node_name = self.selected_node.get()
