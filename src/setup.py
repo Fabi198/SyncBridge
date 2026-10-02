@@ -217,6 +217,174 @@ class SyncBridgeWizard(tk.Tk):
                 messagebox.showerror("Error", f"No se pudo crear la carpeta base:\n{e}")
                 return
 
+        self.clear_container()
+        
+        # Títulos
+        tk.Label(self.container, text="Seleccionar Estructura a Sincronizar", font=("Arial", 14, "bold")).pack(anchor="w", pady=(0, 5))
+        tk.Label(self.container, text="Expandí las carpetas y marcá las que quieras incluir en la red P2P:", font=("Arial", 9)).pack(anchor="w", pady=(0, 10))
+
+        # --- CONTENEDOR CON ÁRBOL JERÁRQUICO ---
+        tree_container = tk.Frame(self.container)
+        tree_container.pack(fill="both", expand=True, pady=5)
+
+        tree_scroll = ttk.Scrollbar(tree_container, orient="vertical")
+        tree_scroll.pack(side="right", fill="y")
+
+        # Creamos el Treeview (asegurate de tener 'from tkinter import ttk' arriba)
+        self.tree = ttk.Treeview(
+            tree_container, 
+            yscrollcommand=tree_scroll.set, 
+            selectmode="browse",
+            height=12
+        )
+        self.tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.config(command=self.tree.yview)
+
+        # Diccionario para almacenar las rutas y su estado de selección
+        self.tree_vars = {}
+
+        # Función recursiva para poblar carpetas y subcarpetas en forma de árbol
+        def populate_tree(parent_id, current_path):
+            try:
+                for p in sorted(current_path.iterdir()):
+                    if p.is_dir() and not p.name.startswith('.'):
+                        node_id = self.tree.insert(parent_id, "end", text=f" ☑ {p.name}", open=False)
+                        self.tree_vars[node_id] = {"path": p, "selected": True}
+                        # Llamada recursiva para subcarpetas anidadas
+                        populate_tree(node_id, p)
+            except PermissionError:
+                pass
+
+        # Nodo raíz principal
+        root_id = self.tree.insert("", "end", text=f" 📂 {base_path.name or base_path}", open=True)
+        self.tree_vars[root_id] = {"path": base_path, "selected": True}
+        
+        # Construir el árbol completo de directorios
+        populate_tree(root_id, base_path)
+
+        # Evento para alternar el checkbox al hacer clic sobre un elemento del árbol
+        def on_tree_click(event):
+            item_id = self.tree.identify_row(event.y)
+            if item_id and item_id in self.tree_vars:
+                current_state = self.tree_vars[item_id]["selected"]
+                new_state = not current_state
+                self.tree_vars[item_id]["selected"] = new_state
+                
+                # Actualizar icono visual de selección
+                current_text = self.tree.item(item_id, "text")
+                for old_icon in [" ☑ ", " ◻ ", " 📂 "]:
+                    current_text = current_text.replace(old_icon, "")
+                
+                icon = " ☑ " if new_state else " ◻ "
+                prefix = " 📂 " if item_id == root_id else icon
+                self.tree.item(item_id, text=f"{prefix}{current_text.strip()}")
+
+        self.tree.bind("<Button-1>", on_tree_click)
+
+        # --- BOTÓN FIJO ABAJO ---
+        btn_finish = tk.Button(
+            self.container, 
+            text="Finalizar e Instalar 🚀", 
+            bg="#28a745", 
+            fg="white", 
+            font=("Arial", 10, "bold"), 
+            padx=15, 
+            pady=8, 
+            command=self.save_and_finish_tree
+        )
+        btn_finish.pack(anchor="e", pady=(15, 0))
+
+    def save_and_finish_tree(self):
+        # Recolectar rutas relativas de las subcarpetas seleccionadas en el árbol
+        base_path_str = self.base_path_var.get().strip()
+        base_path = Path(base_path_str)
+        
+        selected_subfolders = []
+        for node_id, data in self.tree_vars.items():
+            if data["selected"] and data["path"] != base_path:
+                try:
+                    rel_path = data["path"].relative_to(base_path)
+                    selected_subfolders.append(str(rel_path).replace("\\", "/"))
+                except ValueError:
+                    pass
+
+        # Inyectamos la lista en la variable que lee el guardado y ejecutamos
+        self.subfolder_vars_list = selected_subfolders
+        self.save_and_finish_custom(selected_subfolders)
+
+    def save_and_finish_custom(self, selected_subfolders):
+        node_name = self.selected_node.get()
+        base_path_str = self.base_path_var.get().strip()
+        base_path = Path(base_path_str)
+        mailbox_name = f"mailbox_{node_name}"
+        safe_base_path = str(base_path).replace("\\", "/")
+
+        client_id_val = self.client_id_var.get().strip()
+        client_secret_val = self.client_secret_var.get().strip()
+
+        config_content = f'''# Archivo de configuración autogenerado por el Asistente de SyncBridge
+from pathlib import Path
+
+BASE_PATH = Path(r"{safe_base_path}")
+
+CURRENT_NODE = {{
+    "name": "{node_name}",
+    "mailbox": "{mailbox_name}",
+    "base_path": BASE_PATH,
+    "included_subfolders": {selected_subfolders}
+}}
+
+GDRIVE_CONFIG = {{
+    "folder_id": "{self.root_folder_id}",
+    "client_id": "{client_id_val}",
+    "client_secret": "{client_secret_val}"
+}}
+
+SYNC_SECRET = "sync_bridge_secure_token"
+'''
+        try:
+            CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            CONFIG_FILE.write_text(config_content, encoding='utf-8')
+
+            self.cluster_state["nodes_configured"][node_name] = True
+            
+            json_data = json.dumps(self.cluster_state, indent=4).encode('utf-8')
+            fh = io.BytesIO(json_data)
+            media = MediaIoBaseUpload(fh, mimetype='application/json', resumable=True)
+
+            state_query = f"name = 'cluster_state.json' and '{self.root_folder_id}' in parents and trashed = false"
+            state_files = self.service.files().list(q=state_query, spaces='drive', fields='files(id)').execute().get('files', [])
+
+            if state_files:
+                self.state_file_id = state_files[0]['id']
+                for extra in state_files[1:]:
+                    try:
+                        self.service.files().delete(fileId=extra['id']).execute()
+                    except Exception:
+                        pass
+                self.service.files().update(fileId=self.state_file_id, media_body=media).execute()
+            else:
+                file_metadata = {'name': 'cluster_state.json', 'parents': [self.root_folder_id]}
+                created = self.service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                self.state_file_id = created.get('id')
+
+            messagebox.showinfo("¡Instalación Completa!", f"Este equipo quedó configurado como '{node_name}'.\n¡Ya podés iniciar!")
+            self.destroy()
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar:\n{e}")
+        base_path_str = self.base_path_var.get().strip()
+        if not base_path_str:
+            messagebox.showwarning("Ruta vacía", "Por favor, seleccioná una ruta válida.")
+            return
+
+        base_path = Path(base_path_str)
+        if not base_path.exists():
+            try:
+                base_path.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo crear la carpeta base:\n{e}")
+                return
+
         # Escanear subcarpetas directas dentro de la carpeta base
         try:
             subfolders = [f.name for f in base_path.iterdir() if f.is_dir() and not f.name.startswith('.')]
