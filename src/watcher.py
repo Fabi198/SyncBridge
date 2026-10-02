@@ -160,10 +160,33 @@ class SyncHandler(FileSystemEventHandler):
 
             temp_path = None
             try:
-                # 1. Leer el estado del clúster para obtener la lista actualizada de nodos
-                cluster_state = get_or_create_cluster_state(self.service)
-                node_names = cluster_state.get("node_names", [])
+                # 1. Buscar y descargar el archivo 'cluster_state.json' real desde Google Drive
+                cluster_folder_id = get_or_create_root_folder(self.service)
+                state_query = f"name = 'cluster_state.json' and '{cluster_folder_id}' in parents and trashed = false"
+                state_files = self.service.files().list(q=state_query, spaces='drive', fields='files(id)').execute().get('files', [])
+                
+                node_names = []
+                if state_files:
+                    file_id = state_files[0]['id']
+                    request = self.service.files().get_media(fileId=file_id)
+                    fh = io.BytesIO()
+                    downloader = MediaIoBaseDownload(fh, request)
+                    done = False
+                    while not done:
+                        _, done = downloader.next_chunk()
+                    
+                    try:
+                        state_data = json.loads(fh.getvalue().decode('utf-8'))
+                        # Extraer las claves o nombres de los nodos configurados en el estado
+                        nodes_configured = state_data.get("nodes_configured", {})
+                        node_names = list(nodes_configured.keys())
+                    except Exception:
+                        node_names = []
+
                 current_name = CURRENT_NODE["name"]
+
+                # Asegurar que exista la carpeta principal de buzones
+                mailboxes_parent_id = get_or_create_cluster_state(self.service)
 
                 # 2. Iterar sobre todos los demás nodos de la red P2P (excluyéndonos a nosotros mismos)
                 for target_node in node_names:
@@ -171,7 +194,7 @@ class SyncHandler(FileSystemEventHandler):
                         continue
 
                     mailbox_name = f"mailbox_{target_node}"
-                    target_mailbox_id = get_or_create_folder(self.service, mailbox_name, self.root_folder_id)
+                    target_mailbox_id = get_or_create_folder(self.service, mailbox_name, mailboxes_parent_id)
 
                     # 3. Buscar si ya existe 'cluster_instructions.json' en el buzón de ese nodo específico
                     query = f"name = 'cluster_instructions.json' and '{target_mailbox_id}' in parents and trashed = false"
