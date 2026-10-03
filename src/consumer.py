@@ -159,6 +159,11 @@ def process_mailbox():
                                     else:
                                         logging.info(f"ℹ️ [CONSUMIDOR] El elemento a eliminar ya no existía localmente: {target_path}")
 
+                                elif action == "CREATE_DIR":
+                                    logging.info(f"📁 [CONSUMIDOR] Creando directorio local: {target_path}")
+                                    target_path.mkdir(parents=True, exist_ok=True)
+                                    logging.info(f"✅ [CONSUMIDOR] Directorio creado con éxito: {target_path}")
+
                                 elif action in ["RENAME", "MOVE_DIRECTORY"]:
                                     dest_raw = inst.get("dest")
                                     if not dest_raw:
