@@ -67,13 +67,13 @@ def process_mailbox():
                 while not done:
                     _, done = downloader.next_chunk()
                 content_bytes = fh.getvalue()
-                logging.info(f"⬇️️ [CONSUMIDOR] Descargados {len(content_bytes)} bytes del archivo '{file_name}'")
+                logging.info(f"⬇ [CONSUMIDOR] Descargados {len(content_bytes)} bytes del archivo '{file_name}'")
             except Exception as e:
                 logging.error(f"❌ [CONSUMIDOR] Error al descargar el archivo del buzón {file_name}: {e}")
                 continue
 
             if not content_bytes:
-                logging.warning(f"⚠️️ [CONSUMIDOR] El archivo '{file_name}' está vacío. Eliminando de Drive...")
+                logging.warning(f"⚠ [CONSUMIDOR] El archivo '{file_name}' está vacío. Eliminando de Drive...")
                 try:
                     service.files().delete(fileId=file_id).execute()
                 except Exception:
@@ -143,7 +143,7 @@ def process_mailbox():
                                     # 2. Eliminar el archivo temporal compartido de la nube
                                     try:
                                         service.files().delete(fileId=cloud_file_id).execute()
-                                        logging.info(f"🗑️️ [CONSUMIDOR] Archivo temporal en nube (ID: {cloud_file_id}) eliminado correctamente.")
+                                        logging.info(f"🗑 [CONSUMIDOR] Archivo temporal en nube (ID: {cloud_file_id}) eliminado correctamente.")
                                     except Exception as del_e:
                                         logging.warning(f"⚠️ [CONSUMIDOR] No se pudo borrar el archivo temporal {cloud_file_id}: {del_e}")
 
@@ -158,6 +158,31 @@ def process_mailbox():
                                         logging.info(f"🗑️ [CONSUMIDOR] Elemento eliminado localmente con éxito: {rel_path}")
                                     else:
                                         logging.info(f"ℹ️ [CONSUMIDOR] El elemento a eliminar ya no existía localmente: {target_path}")
+
+                                elif action in ["RENAME", "MOVE_DIRECTORY"]:
+                                    dest_raw = inst.get("dest")
+                                    if not dest_raw:
+                                        logging.warning(f"⚠️ [CONSUMIDOR] Instrucción RENAME descartada por falta de 'dest'. Contenido: {inst}")
+                                        continue
+                                    
+                                    dest_path_obj = Path(dest_raw)
+                                    if dest_path_obj.is_absolute():
+                                        try:
+                                            dest_target_path = BASE_PATH / dest_path_obj.relative_to(dest_path_obj.anchor)
+                                        except Exception:
+                                            dest_target_path = BASE_PATH / dest_path_obj.name
+                                    else:
+                                        dest_target_path = BASE_PATH / dest_path_obj
+
+                                    logging.info(f"🔄 [CONSUMIDOR] Ejecutando renombramiento/movimiento de '{target_path}' a '{dest_target_path}'")
+                                    
+                                    if target_path.exists():
+                                        dest_target_path.parent.mkdir(parents=True, exist_ok=True)
+                                        target_path.rename(dest_target_path)
+                                        logging.info(f"✅ [CONSUMIDOR] Renombrado aplicado con éxito localmente.")
+                                    else:
+                                        logging.info(f"ℹ️ [CONSUMIDOR] El archivo original a renombrar no existía localmente: {target_path}")
+
                             finally:
                                 # 🔊 REACTIVAR EL WATCHDOG PASE LO QUE PASE
                                 src.config.IS_SYNCING_FROM_NETWORK = False
