@@ -33,7 +33,7 @@ class SyncHandler(FileSystemEventHandler):
         # Archivo local consolidado para acumular instrucciones y no spamear la API
         self.queue_file = CURRENT_NODE["base_path"] / "cluster_queue.json"
         
-        # Hilo en segundo plano para enviar la cola acumulada a todos los nodos del clúster cada pocos segundos
+        # Hilo en segundo plano para procesar la cola, subir archivos con calma y enviar a los nodos
         self.batch_thread = threading.Thread(target=self._batch_sender_loop, daemon=True)
         self.batch_thread.start()
 
@@ -143,7 +143,7 @@ class SyncHandler(FileSystemEventHandler):
             logging.error(f"❌ Error al registrar instrucción '{action}': {e}")
 
     def _batch_sender_loop(self):
-        """Distribuye la cola local a los buzones de TODOS los demás nodos del clúster directamente en la raíz"""
+        """Procesa la cola local, sube archivos pendientes de a uno con reintentos y distribuye a los nodos"""
         from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
         import io
 
@@ -161,6 +161,26 @@ class SyncHandler(FileSystemEventHandler):
                     self.queue_file.unlink()
                 except Exception:
                     continue
+
+            # 💡 Sube los archivos a Google Drive con calma y reintentos automáticos para evitar saturación SSL
+            for inst in new_instructions:
+                if inst.get("action") == "CREATE_OR_UPDATE" and not inst.get("file_id"):
+                    src_path = inst.get("src")
+                    if src_path and Path(src_path).exists():
+                        success = False
+                        for intento in range(3):
+                            try:
+                                logging.info(f"☁ [BATCH] Subiendo archivo a Drive (Intento {intento+1}/3): {src_path}")
+                                file_id = upload_file_to_mailbox(self.service, src_path, self.root_folder_id)
+                                if file_id:
+                                    inst["file_id"] = file_id
+                                    success = True
+                                    break
+                            except Exception as net_e:
+                                logging.warning(f"⚠ Error de red al subir {src_path}, reintentando en 3s... ({net_e})")
+                                time.sleep(3)
+                        if not success:
+                            logging.error(f"❌ No se pudo subir el archivo tras varios intentos: {src_path}")
 
             temp_path = None
             try:
@@ -294,24 +314,13 @@ class SyncHandler(FileSystemEventHandler):
                 else:
                     return
 
-                logging.info(f"🟢 [CREACIÓN] Archivo nuevo detectado: {event.src_path}")
+                logging.info(f"🟢 [CREACIÓN] Archivo nuevo detectado (en cola): {event.src_path}")
                 
-                file_id = None
-                for _ in range(5):
-                    try:
-                        file_id = upload_file_to_mailbox(self.service, event.src_path, self.root_folder_id)
-                        break
-                    except (PermissionError, OSError):
-                        time.sleep(1)
-                
-                if not file_id:
-                    logging.warning(f"⏳ Archivo temporalmente bloqueado por el sistema: {event.src_path}")
-                    return
-
                 base_path = CURRENT_NODE["base_path"]
                 rel_path = path_obj.relative_to(base_path)
                 
-                self.register_instruction("CREATE_OR_UPDATE", event.src_path, file_id=file_id, rel_path=rel_path)
+                # Registra la orden de inmediato sin bloquear subiendo a la red; el hilo batch se encarga después
+                self.register_instruction("CREATE_OR_UPDATE", event.src_path, file_id=None, rel_path=rel_path)
         except Exception as e:
             logging.error(f"❌ Error en creación: {e}")
 
@@ -340,23 +349,12 @@ class SyncHandler(FileSystemEventHandler):
                 return
 
             self.file_sizes[event.src_path] = current_size
-            logging.info(f"🟡 [MODIFICACIÓN] Archivo actualizado: {event.src_path}")
+            logging.info(f"🟡 [MODIFICACIÓN] Archivo actualizado (en cola): {event.src_path}")
             
-            file_id = None
-            for _ in range(5):
-                try:
-                    file_id = upload_file_to_mailbox(self.service, event.src_path, self.root_folder_id)
-                    break
-                except (PermissionError, OSError):
-                    time.sleep(1)
-
-            if not file_id:
-                return
-
             base_path = CURRENT_NODE["base_path"]
             rel_path = path_obj.relative_to(base_path)
             
-            self.register_instruction("CREATE_OR_UPDATE", event.src_path, file_id=file_id, rel_path=rel_path)
+            self.register_instruction("CREATE_OR_UPDATE", event.src_path, file_id=None, rel_path=rel_path)
         except Exception as e:
             logging.error(f"❌ Error en modificación: {e}")
 
@@ -364,7 +362,6 @@ class SyncHandler(FileSystemEventHandler):
         if not self.is_initialized or self.is_muted:
             return
         
-        # 🔇 Si la red está aplicando cambios, ignorar
         if src.config.IS_SYNCING_FROM_NETWORK:
             return
 
@@ -375,9 +372,6 @@ class SyncHandler(FileSystemEventHandler):
             base_path = CURRENT_NODE["base_path"]
             src_name = Path(event.src_path).name.lower()
             
-            # 💡 DETECCIÓN DE BUG: Si el usuario creó una "Nueva carpeta" (o similar genérico) 
-            # y inmediatamente la renombró, el sistema operativo lanza un 'on_moved'. 
-            # Si el origen es un nombre temporal típico, lo tratamos como una CREACIÓN directa del destino.
             nombres_temporales_creacion = ["nueva carpeta", "untitled folder", "nuevo archivo", "new folder"]
             es_creacion_con_renombre_rapido = any(temp in src_name for temp in nombres_temporales_creacion)
 
@@ -390,18 +384,13 @@ class SyncHandler(FileSystemEventHandler):
                 if event.is_directory or path_dest.is_dir():
                     self.register_instruction("CREATE_DIR", event.dest_path, rel_path=str(rel_dest))
                 else:
-                    # Si es un archivo con contenido inicial
-                    cloud_file_id = None
                     if path_dest.exists() and path_dest.is_file():
                         self.file_sizes[event.dest_path] = path_dest.stat().st_size
-                        # Opcional: Subir a Drive el archivo si ya tiene contenido para que el consumidor lo baje
-                        # cloud_file_id = upload_to_drive(path_dest) 
-                    self.register_instruction("CREATE_OR_UPDATE", event.dest_path, file_id=cloud_file_id, rel_path=str(rel_dest))
+                    self.register_instruction("CREATE_OR_UPDATE", event.dest_path, file_id=None, rel_path=str(rel_dest))
                 return
 
-            # --- Flujo normal de RENAME si no es un nombre temporal ---
             if event.is_directory:
-                logging.info(f"📁 [MOVIMIENTO DE CARPETA] {event.src_path} ➡️ {event.dest_path}")
+                logging.info(f"📁 [MOVIMIENTO DE CARPETA] {event.src_path} ➡️️ {event.dest_path}")
                 rel_src = Path(event.src_path).relative_to(base_path)
                 rel_dest = Path(event.dest_path).relative_to(base_path)
                 self.register_instruction("MOVE_DIRECTORY", event.src_path, dest=str(rel_dest), rel_path=str(rel_src))
