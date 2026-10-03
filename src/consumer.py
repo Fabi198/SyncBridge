@@ -6,7 +6,8 @@ import threading
 from pathlib import Path
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-from src.config import BASE_PATH, CURRENT_NODE, GDRIVE_CONFIG, IS_SYNCING_FROM_NETWORK
+import src.config 
+from src.config import BASE_PATH, CURRENT_NODE, GDRIVE_CONFIG
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -117,8 +118,7 @@ def process_mailbox():
                             logging.info(f"🎯 [CONSUMIDOR] Ruta de destino calculada localmente: {target_path}")
 
                             # 🔇 SILENCIAR EL WATCHDOG MIENTRAS APLICAMOS LOS CAMBIOS DE LA RED
-                            global IS_SYNCING_FROM_NETWORK
-                            IS_SYNCING_FROM_NETWORK = True
+                            src.config.IS_SYNCING_FROM_NETWORK = True
                             
                             try:
                                 if action == "CREATE_OR_UPDATE" and cloud_file_id:
@@ -160,7 +160,7 @@ def process_mailbox():
                                         logging.info(f"ℹ️ [CONSUMIDOR] El elemento a eliminar ya no existía localmente: {target_path}")
                             finally:
                                 # 🔊 REACTIVAR EL WATCHDOG PASE LO QUE PASE
-                                IS_SYNCING_FROM_NETWORK = False
+                                src.config.IS_SYNCING_FROM_NETWORK = False
 
                         except Exception as inner_e:
                             logging.error(f"❌ [CONSUMIDOR] Error procesando una instrucción individual ({inst}): {inner_e}")

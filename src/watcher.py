@@ -8,7 +8,8 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import tkinter as tk
 from tkinter import messagebox
-from src.config import CURRENT_NODE, GDRIVE_CONFIG, IS_SYNCING_FROM_NETWORK
+import src.config
+from src.config import CURRENT_NODE, GDRIVE_CONFIG
 from src.gdrive import (
     get_drive_service,
     get_or_create_root_folder,
@@ -38,7 +39,7 @@ class SyncHandler(FileSystemEventHandler):
 
     def _is_ignorable(self, path_str: str) -> bool:
         # 🔇 Si la red está aplicando cambios, ignoramos absolutamente todo lo que pase en el disco
-        if IS_SYNCING_FROM_NETWORK:
+        if src.config.IS_SYNCING_FROM_NETWORK:
             return True
 
         path_lower = path_str.lower()
