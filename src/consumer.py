@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-from src.config import BASE_PATH, CURRENT_NODE, GDRIVE_CONFIG, NETWORK_PROCESSED_PATHS
+from src.config import BASE_PATH, CURRENT_NODE, GDRIVE_CONFIG, IS_SYNCING_FROM_NETWORK
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -66,13 +66,13 @@ def process_mailbox():
                 while not done:
                     _, done = downloader.next_chunk()
                 content_bytes = fh.getvalue()
-                logging.info(f"⬇️ [CONSUMIDOR] Descargados {len(content_bytes)} bytes del archivo '{file_name}'")
+                logging.info(f"⬇️️ [CONSUMIDOR] Descargados {len(content_bytes)} bytes del archivo '{file_name}'")
             except Exception as e:
                 logging.error(f"❌ [CONSUMIDOR] Error al descargar el archivo del buzón {file_name}: {e}")
                 continue
 
             if not content_bytes:
-                logging.warning(f"⚠️ [CONSUMIDOR] El archivo '{file_name}' está vacío. Eliminando de Drive...")
+                logging.warning(f"⚠️️ [CONSUMIDOR] El archivo '{file_name}' está vacío. Eliminando de Drive...")
                 try:
                     service.files().delete(fileId=file_id).execute()
                 except Exception:
@@ -116,51 +116,51 @@ def process_mailbox():
                             target_path = BASE_PATH / rel_path
                             logging.info(f"🎯 [CONSUMIDOR] Ruta de destino calculada localmente: {target_path}")
 
-                            if action == "CREATE_OR_UPDATE" and cloud_file_id:
-                                logging.info(f"☁️️ [CONSUMIDOR] Descargando archivo adjunto de Drive (ID: {cloud_file_id}) para replicar en: {target_path}")
-                                
-                                # 1. Descargar el archivo real desde Google Drive usando el file_id compartido
-                                req_file = service.files().get_media(fileId=cloud_file_id)
-                                fh_file = io.BytesIO()
-                                dl_file = MediaIoBaseDownload(fh_file, req_file)
-                                done_file = False
-                                while not done_file:
-                                    _, done_file = dl_file.next_chunk()
+                            # 🔇 SILENCIAR EL WATCHDOG MIENTRAS APLICAMOS LOS CAMBIOS DE LA RED
+                            global IS_SYNCING_FROM_NETWORK
+                            IS_SYNCING_FROM_NETWORK = True
+                            
+                            try:
+                                if action == "CREATE_OR_UPDATE" and cloud_file_id:
+                                    logging.info(f"☁ [CONSUMIDOR] Descargando archivo adjunto de Drive (ID: {cloud_file_id}) para replicar en: {target_path}")
+                                    
+                                    # 1. Descargar el archivo real desde Google Drive usando el file_id compartido
+                                    req_file = service.files().get_media(fileId=cloud_file_id)
+                                    fh_file = io.BytesIO()
+                                    dl_file = MediaIoBaseDownload(fh_file, req_file)
+                                    done_file = False
+                                    while not done_file:
+                                        _, done_file = dl_file.next_chunk()
 
-                                # Crear carpetas intermedias explícitamente
-                                target_path.parent.mkdir(parents=True, exist_ok=True)
-                                logging.info(f"📁 [CONSUMIDOR] Directorio contenedor asegurado: {target_path.parent}")
-                                
-                                # 🛡️ REGISTRAR EN EL ESCUDO GLOBAL ANTES DE ESCRIBIR PARA EVITAR ECO EN WATCHDOG
-                                abs_target_str = str(target_path.resolve())
-                                NETWORK_PROCESSED_PATHS.add(abs_target_str)
+                                    # Crear carpetas intermedias explícitamente
+                                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                                    logging.info(f"📁 [CONSUMIDOR] Directorio contenedor asegurado: {target_path.parent}")
+                                    
+                                    # Escribir el archivo localmente (el watcher lo ignorará gracias a la bandera)
+                                    target_path.write_bytes(fh_file.getvalue())
+                                    logging.info(f"✅ [CONSUMIDOR] ¡ÉXITO! Archivo sincronizado y escrito localmente: {target_path} (Relativo: {rel_path})")
 
-                                # Escribir el archivo localmente
-                                target_path.write_bytes(fh_file.getvalue())
-                                logging.info(f"✅ [CONSUMIDOR] ¡ÉXITO! Archivo sincronizado y escrito localmente: {target_path} (Relativo: {rel_path})")
+                                    # 2. Eliminar el archivo temporal compartido de la nube
+                                    try:
+                                        service.files().delete(fileId=cloud_file_id).execute()
+                                        logging.info(f"🗑️️ [CONSUMIDOR] Archivo temporal en nube (ID: {cloud_file_id}) eliminado correctamente.")
+                                    except Exception as del_e:
+                                        logging.warning(f"⚠️ [CONSUMIDOR] No se pudo borrar el archivo temporal {cloud_file_id}: {del_e}")
 
-                                # 2. Eliminar el archivo temporal compartido de la nube
-                                try:
-                                    service.files().delete(fileId=cloud_file_id).execute()
-                                    logging.info(f"🗑️ [CONSUMIDOR] Archivo temporal en nube (ID: {cloud_file_id}) eliminado correctamente.")
-                                except Exception as del_e:
-                                    logging.warning(f"⚠️ [CONSUMIDOR] No se pudo borrar el archivo temporal {cloud_file_id}: {del_e}")
-
-                            elif action in ["DELETE", "DELETE_DIR"]:
-                                logging.info(f"🗑️ [CONSUMIDOR] Ejecutando orden de eliminación para: {target_path}")
-                                if target_path.exists():
-                                    # 🛡️ REGISTRAR EN EL ESCUDO GLOBAL ANTES DE BORRAR PARA EVITAR ECO EN WATCHDOG
-                                    abs_target_str = str(target_path.resolve())
-                                    NETWORK_PROCESSED_PATHS.add(abs_target_str)
-
-                                    if target_path.is_file():
-                                        target_path.unlink()
-                                    elif target_path.is_dir():
-                                        import shutil
-                                        shutil.rmtree(target_path, ignore_errors=True)
-                                    logging.info(f"🗑️ [CONSUMIDOR] Elemento eliminado localmente con éxito: {rel_path}")
-                                else:
-                                    logging.info(f"ℹ️ [CONSUMIDOR] El elemento a eliminar ya no existía localmente: {target_path}")
+                                elif action in ["DELETE", "DELETE_DIR"]:
+                                    logging.info(f"🗑️ [CONSUMIDOR] Ejecutando orden de eliminación para: {target_path}")
+                                    if target_path.exists():
+                                        if target_path.is_file():
+                                            target_path.unlink()
+                                        elif target_path.is_dir():
+                                            import shutil
+                                            shutil.rmtree(target_path, ignore_errors=True)
+                                        logging.info(f"🗑️ [CONSUMIDOR] Elemento eliminado localmente con éxito: {rel_path}")
+                                    else:
+                                        logging.info(f"ℹ️ [CONSUMIDOR] El elemento a eliminar ya no existía localmente: {target_path}")
+                            finally:
+                                # 🔊 REACTIVAR EL WATCHDOG PASE LO QUE PASE
+                                IS_SYNCING_FROM_NETWORK = False
 
                         except Exception as inner_e:
                             logging.error(f"❌ [CONSUMIDOR] Error procesando una instrucción individual ({inst}): {inner_e}")

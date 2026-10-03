@@ -8,7 +8,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import tkinter as tk
 from tkinter import messagebox
-from src.config import CURRENT_NODE, GDRIVE_CONFIG, NETWORK_PROCESSED_PATHS
+from src.config import CURRENT_NODE, GDRIVE_CONFIG, IS_SYNCING_FROM_NETWORK
 from src.gdrive import (
     get_drive_service,
     get_or_create_root_folder,
@@ -36,22 +36,11 @@ class SyncHandler(FileSystemEventHandler):
         self.batch_thread = threading.Thread(target=self._batch_sender_loop, daemon=True)
         self.batch_thread.start()
 
-    def _check_and_bypass_network_event(self, event_path) -> bool:
-        """
-        Verifica si el evento fue producido por el consumidor de la red.
-        Si es así, lo ignora y limpia la ruta del conjunto al instante para liberar futuros cambios del usuario.
-        """
-        try:
-            abs_path_str = str(Path(event_path).resolve())
-            if abs_path_str in NETWORK_PROCESSED_PATHS:
-                NETWORK_PROCESSED_PATHS.remove(abs_path_str)
-                logging.debug(f"🔇 [WATCHDOG] Ignorando eco de red y liberando ruta: {event_path}")
-                return True
-        except Exception:
-            pass
-        return False
-
     def _is_ignorable(self, path_str: str) -> bool:
+        # 🔇 Si la red está aplicando cambios, ignoramos absolutamente todo lo que pase en el disco
+        if IS_SYNCING_FROM_NETWORK:
+            return True
+
         path_lower = path_str.lower()
         path_obj = Path(path_str)
         
@@ -286,10 +275,6 @@ class SyncHandler(FileSystemEventHandler):
         if not self.is_initialized or self.is_muted or self._is_ignorable(event.src_path):
             return
         
-        # 🛡️ Validar si el evento fue generado por el consumidor de la red
-        if self._check_and_bypass_network_event(event.src_path):
-            return
-        
         try:
             path_obj = Path(event.src_path)
             
@@ -331,10 +316,6 @@ class SyncHandler(FileSystemEventHandler):
 
     def on_modified(self, event):
         if not self.is_initialized or self.is_muted or event.is_directory or self._is_ignorable(event.src_path):
-            return
-        
-        # 🛡️ Validar si el evento fue generado por el consumidor de la red
-        if self._check_and_bypass_network_event(event.src_path):
             return
         
         try:
@@ -405,10 +386,6 @@ class SyncHandler(FileSystemEventHandler):
 
     def on_deleted(self, event):
         if not self.is_initialized or self.is_muted or self._is_ignorable(event.src_path):
-            return
-        
-        # 🛡️ Validar si el evento fue generado por el consumidor de la red
-        if self._check_and_bypass_network_event(event.src_path):
             return
         
         if event.src_path in self.file_sizes:
