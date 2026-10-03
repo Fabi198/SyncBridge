@@ -364,13 +364,47 @@ class SyncHandler(FileSystemEventHandler):
         if not self.is_initialized or self.is_muted:
             return
         
+        # 🔇 Si la red está aplicando cambios, ignorar
+        if src.config.IS_SYNCING_FROM_NETWORK:
+            return
+
         if self._is_ignorable(event.src_path) or self._is_ignorable(event.dest_path):
             return
         
         try:
+            base_path = CURRENT_NODE["base_path"]
+            src_name = Path(event.src_path).name.lower()
+            
+            # 💡 DETECCIÓN DE BUG: Si el usuario creó una "Nueva carpeta" (o similar genérico) 
+            # y inmediatamente la renombró, el sistema operativo lanza un 'on_moved'. 
+            # Si el origen es un nombre temporal típico, lo tratamos como una CREACIÓN directa del destino.
+            nombres_temporales_creacion = ["nueva carpeta", "untitled folder", "nuevo archivo", "new folder"]
+            es_creacion_con_renombre_rapido = any(temp in src_name for temp in nombres_temporales_creacion)
+
+            if es_creacion_con_renombre_rapido:
+                logging.info(f"✨ [DETECCIÓN INTELIGENTE] Renombramiento desde nombre temporal detectado ({event.src_path} ➡️ {event.dest_path}). Tratando como CREACIÓN.")
+                
+                path_dest = Path(event.dest_path)
+                rel_dest = path_dest.relative_to(base_path)
+                
+                if event.is_directory or path_dest.is_dir():
+                    self.register_instruction("CREATE_DIR", event.dest_path, rel_path=str(rel_dest))
+                else:
+                    # Si es un archivo con contenido inicial
+                    cloud_file_id = None
+                    if path_dest.exists() and path_dest.is_file():
+                        self.file_sizes[event.dest_path] = path_dest.stat().st_size
+                        # Opcional: Subir a Drive el archivo si ya tiene contenido para que el consumidor lo baje
+                        # cloud_file_id = upload_to_drive(path_dest) 
+                    self.register_instruction("CREATE_OR_UPDATE", event.dest_path, file_id=cloud_file_id, rel_path=str(rel_dest))
+                return
+
+            # --- Flujo normal de RENAME si no es un nombre temporal ---
             if event.is_directory:
                 logging.info(f"📁 [MOVIMIENTO DE CARPETA] {event.src_path} ➡️ {event.dest_path}")
-                self.register_instruction("MOVE_DIRECTORY", event.src_path, event.dest_path)
+                rel_src = Path(event.src_path).relative_to(base_path)
+                rel_dest = Path(event.dest_path).relative_to(base_path)
+                self.register_instruction("MOVE_DIRECTORY", event.src_path, dest=str(rel_dest), rel_path=str(rel_src))
                 return
 
             if event.src_path in self.file_sizes:
@@ -381,7 +415,12 @@ class SyncHandler(FileSystemEventHandler):
                 self.file_sizes[event.dest_path] = path_obj.stat().st_size
                 
             logging.info(f"🔵 [RENOMBRE/MOVER ARCHIVO] {event.src_path} ➡️ {event.dest_path}")
-            self.register_instruction("RENAME", event.src_path, event.dest_path)
+            
+            rel_src = Path(event.src_path).relative_to(base_path)
+            rel_dest = Path(event.dest_path).relative_to(base_path)
+            
+            self.register_instruction("RENAME", event.src_path, dest=str(rel_dest), rel_path=str(rel_src))
+            
         except Exception as e:
             logging.error(f"❌ Error en movimiento/renombramiento: {e}")
 
