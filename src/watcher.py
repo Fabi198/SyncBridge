@@ -104,7 +104,7 @@ class SyncHandler(FileSystemEventHandler):
         logging.info(f"✅ Escaneo inicial completado. {count} archivos indexados. Watchdog activo y listo.")
 
     def register_instruction(self, action, src, dest=None, file_id=None, rel_path=None):
-        """Agrega o actualiza la orden en cluster_queue.json evitando colisiones por renombrados rápidos"""
+        """Agrega o actualiza la orden en cluster_queue.json con rutas absolutas correctas"""
         try:
             base_path = CURRENT_NODE["base_path"]
             
@@ -123,16 +123,15 @@ class SyncHandler(FileSystemEventHandler):
                     except json.JSONDecodeError:
                         queue_data = []
                 
-                # 💡 FUSIÓN INTELIGENTE: Si la acción es RENAME, verificamos si el archivo de origen (src)
-                # estaba pendiente de subida como CREATE_OR_UPDATE. Si es así, transformamos esa orden 
-                # directamente en un CREATE_OR_UPDATE del destino (dest), evitando el RENAME fallido.
+                # Fusión inteligente para renombrados rápidos de archivos nuevos
                 if action == "RENAME":
                     actualizado = False
                     for item in queue_data:
                         if item.get("action") == "CREATE_OR_UPDATE" and item.get("src") == str(src):
-                            logging.info(f"✨ [OPTIMIZACIÓN DE COLA] Fusionando creación y renombramiento rápido para: {dest}")
+                            logging.info(f"✨ [OPTIMIZACIÓN DE COLA] Actualizando ruta de creación a: {dest}")
+                            # 💡 AQUÍ ESTABA EL BUG: Guardábamos dest como relativo. Debe ser la ruta absoluta completa (str(dest))
                             item["src"] = str(dest)
-                            item["rel_path"] = str(Path(dest).relative_to(base_path)) if base_path in Path(dest).parents or base_path == Path(dest).parent else str(Path(dest).name)
+                            item["rel_path"] = str(Path(dest).relative_to(base_path))
                             item["timestamp"] = time.time()
                             actualizado = True
                             break
@@ -180,7 +179,7 @@ class SyncHandler(FileSystemEventHandler):
                 except Exception:
                     continue
 
-            # 💡 Sube los archivos a Google Drive con calma y reintentos automáticos para evitar saturación SSL
+            # Sube los archivos a Google Drive usando la ruta absoluta correcta (src)
             for inst in new_instructions:
                 if inst.get("action") == "CREATE_OR_UPDATE" and not inst.get("file_id"):
                     src_path = inst.get("src")
@@ -188,7 +187,7 @@ class SyncHandler(FileSystemEventHandler):
                         success = False
                         for intento in range(3):
                             try:
-                                logging.info(f"☁ [BATCH] Subiendo archivo a Drive (Intento {intento+1}/3): {src_path}")
+                                logging.info(f"☁ [BATCH] Subiendo archivo final a Drive (Intento {intento+1}/3): {src_path}")
                                 file_id = upload_file_to_mailbox(self.service, src_path, self.root_folder_id)
                                 if file_id:
                                     inst["file_id"] = file_id
