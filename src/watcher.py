@@ -370,13 +370,15 @@ class SyncHandler(FileSystemEventHandler):
         
         try:
             base_path = CURRENT_NODE["base_path"]
-            src_name = Path(event.src_path).name.lower()
             
-            nombres_temporales_creacion = ["nueva carpeta", "untitled folder", "nuevo archivo", "new folder"]
-            es_creacion_con_renombre_rapido = any(temp in src_name for temp in nombres_temporales_creacion)
+            # 🛡️ VALIDACIÓN ROBUSTA: ¿Conocíamos este archivo de origen previamente?
+            # Si NO está en nuestros registros ni en el disco como archivo previo, 
+            # significa que el SO lo creó y renombró de golpe (ej. "Nuevo archivo" -> "script.py")
+            origen_existia_en_cluster = (event.src_path in self.file_sizes) or Path(event.src_path).exists()
 
-            if es_creacion_con_renombre_rapido:
-                logging.info(f"✨ [DETECCIÓN INTELIGENTE] Renombramiento desde nombre temporal detectado ({event.src_path} ➡️ {event.dest_path}). Tratando como CREACIÓN.")
+            # O si el origen no está dentro de nuestros archivos rastreados y el SO hizo un renombramiento instantáneo:
+            if not origen_existia_en_cluster:
+                logging.info(f"✨ [DETECCIÓN ROBUSTA] El origen '{event.src_path}' no existía previamente. Tratando como CREACIÓN.")
                 
                 path_dest = Path(event.dest_path)
                 rel_dest = path_dest.relative_to(base_path)
@@ -389,13 +391,15 @@ class SyncHandler(FileSystemEventHandler):
                     self.register_instruction("CREATE_OR_UPDATE", event.dest_path, file_id=None, rel_path=str(rel_dest))
                 return
 
+            # --- Si el archivo SÍ existía, es un RENAME / MOVE genuino ---
             if event.is_directory:
-                logging.info(f"📁 [MOVIMIENTO DE CARPETA] {event.src_path} ➡️️ {event.dest_path}")
+                logging.info(f"📁 [MOVIMIENTO DE CARPETA] {event.src_path} ➡️ {event.dest_path}")
                 rel_src = Path(event.src_path).relative_to(base_path)
                 rel_dest = Path(event.dest_path).relative_to(base_path)
                 self.register_instruction("MOVE_DIRECTORY", event.src_path, dest=str(rel_dest), rel_path=str(rel_src))
                 return
 
+            # Actualizamos el registro interno de tamaños
             if event.src_path in self.file_sizes:
                 del self.file_sizes[event.src_path]
             
