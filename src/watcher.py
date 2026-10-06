@@ -104,7 +104,7 @@ class SyncHandler(FileSystemEventHandler):
         logging.info(f"✅ Escaneo inicial completado. {count} archivos indexados. Watchdog activo y listo.")
 
     def register_instruction(self, action, src, dest=None, file_id=None, rel_path=None):
-        """Agrega la orden como un objeto nuevo dentro del array de cluster_queue.json"""
+        """Agrega o actualiza la orden en cluster_queue.json evitando colisiones por renombrados rápidos"""
         try:
             base_path = CURRENT_NODE["base_path"]
             
@@ -114,16 +114,6 @@ class SyncHandler(FileSystemEventHandler):
                 except ValueError:
                     rel_path = Path(src).name
 
-            instruction = {
-                "node": CURRENT_NODE["name"],
-                "action": action,
-                "src": str(src),
-                "dest": str(dest) if dest else None,
-                "file_id": file_id,
-                "rel_path": str(rel_path) if rel_path else None,
-                "timestamp": time.time()
-            }
-            
             with self.queue_lock:
                 queue_data = []
                 if self.queue_file.exists():
@@ -133,12 +123,40 @@ class SyncHandler(FileSystemEventHandler):
                     except json.JSONDecodeError:
                         queue_data = []
                 
+                # 💡 FUSIÓN INTELIGENTE: Si la acción es RENAME, verificamos si el archivo de origen (src)
+                # estaba pendiente de subida como CREATE_OR_UPDATE. Si es así, transformamos esa orden 
+                # directamente en un CREATE_OR_UPDATE del destino (dest), evitando el RENAME fallido.
+                if action == "RENAME":
+                    actualizado = False
+                    for item in queue_data:
+                        if item.get("action") == "CREATE_OR_UPDATE" and item.get("src") == str(src):
+                            logging.info(f"✨ [OPTIMIZACIÓN DE COLA] Fusionando creación y renombramiento rápido para: {dest}")
+                            item["src"] = str(dest)
+                            item["rel_path"] = str(Path(dest).relative_to(base_path)) if base_path in Path(dest).parents or base_path == Path(dest).parent else str(Path(dest).name)
+                            item["timestamp"] = time.time()
+                            actualizado = True
+                            break
+                    if actualizado:
+                        with open(self.queue_file, 'w', encoding='utf-8') as f:
+                            json.dump(queue_data, f, indent=4)
+                        return
+
+                instruction = {
+                    "node": CURRENT_NODE["name"],
+                    "action": action,
+                    "src": str(src),
+                    "dest": str(dest) if dest else None,
+                    "file_id": file_id,
+                    "rel_path": str(rel_path) if rel_path else None,
+                    "timestamp": time.time()
+                }
+                
                 queue_data.append(instruction)
                 
                 with open(self.queue_file, 'w', encoding='utf-8') as f:
                     json.dump(queue_data, f, indent=4)
                     
-            logging.info(f"📥 Orden '{action}' agregada a la cola del clúster.")
+            logging.info(f"📥 Orden '{action}' agregada/actualizada en la cola del clúster.")
         except Exception as e:
             logging.error(f"❌ Error al registrar instrucción '{action}': {e}")
 
