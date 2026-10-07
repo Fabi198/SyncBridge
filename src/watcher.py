@@ -104,7 +104,7 @@ class SyncHandler(FileSystemEventHandler):
         logging.info(f"✅ Escaneo inicial completado. {count} archivos indexados. Watchdog activo y listo.")
 
     def register_instruction(self, action, src, dest=None, file_id=None, rel_path=None):
-        """Agrega o actualiza la orden en cluster_queue.json con rutas absolutas correctas"""
+        """Agrega o actualiza la orden en cluster_queue.json manejando rutas absolutas y relativas correctamente"""
         try:
             base_path = CURRENT_NODE["base_path"]
             
@@ -123,15 +123,19 @@ class SyncHandler(FileSystemEventHandler):
                     except json.JSONDecodeError:
                         queue_data = []
                 
-                # Fusión inteligente para renombrados rápidos de archivos nuevos
+                # 💡 FUSIÓN INTELIGENTE CORREGIDA
                 if action == "RENAME":
                     actualizado = False
                     for item in queue_data:
                         if item.get("action") == "CREATE_OR_UPDATE" and item.get("src") == str(src):
-                            logging.info(f"✨ [OPTIMIZACIÓN DE COLA] Actualizando ruta de creación a: {dest}")
-                            # 💡 AQUÍ ESTABA EL BUG: Guardábamos dest como relativo. Debe ser la ruta absoluta completa (str(dest))
-                            item["src"] = str(dest)
-                            item["rel_path"] = str(Path(dest).relative_to(base_path))
+                            logging.info(f"✨ [OPTIMIZACIÓN DE COLA] Actualizando ruta de creación para archivo renombrado.")
+                            
+                            # Si 'dest' que vino es relativo, calculamos su absoluta y su relativa correcta
+                            abs_dest = base_path / dest if not Path(dest).is_absolute() else Path(dest)
+                            rel_dest = Path(dest) if not Path(dest).is_absolute() else Path(dest).relative_to(base_path)
+                            
+                            item["src"] = str(abs_dest)          # Ruta absoluta para que el batch encuentre el archivo
+                            item["rel_path"] = str(rel_dest)     # Ruta relativa para la red
                             item["timestamp"] = time.time()
                             actualizado = True
                             break
